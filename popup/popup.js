@@ -85,7 +85,7 @@ function refreshState() {
     
     // 1. Load settings to UI on first load
     if (isFirstLoad && state.settings) {
-      selectFormat.value = state.settings.format || 'zip_html';
+      selectFormat.value = state.settings.format || 'txt';
       inputMinDelay.value = state.settings.minDelay || 3;
       inputMaxDelay.value = state.settings.maxDelay || 8;
     }

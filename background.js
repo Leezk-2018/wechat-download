@@ -6,7 +6,7 @@ let downloadQueue = [];
 let activeIndex = -1;
 let status = 'idle'; // 'idle', 'running', 'paused', 'completed'
 let settings = {
-  format: 'zip_html', // 'zip_html', 'zip_md', 'single_html'
+  format: 'txt', // 'zip_html', 'zip_md', 'single_html', 'txt'
   minDelay: 3,
   maxDelay: 8,
   concurrency: 1
