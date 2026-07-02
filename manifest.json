@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "微信公众号文章批量下载器",
+  "version": "1.0.0",
+  "description": "一键批量导出微信公众号已发表的文章为 HTML (带图片 ZIP)、Markdown 或单文件 HTML 格式。",
+  "permissions": [
+    "downloads",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://mp.weixin.qq.com/*",
+    "*://*.qpic.cn/*",
+    "*://*.qpic.com.cn/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mp.weixin.qq.com/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html"
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  }
+}

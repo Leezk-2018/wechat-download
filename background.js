@@ -1,0 +1,708 @@
+// Background Service Worker for WeChat Download Extension
+importScripts('libs/jszip.min.js');
+
+// Global state
+let downloadQueue = [];
+let activeIndex = -1;
+let status = 'idle'; // 'idle', 'running', 'paused', 'completed'
+let settings = {
+  format: 'zip_html', // 'zip_html', 'zip_md', 'single_html'
+  minDelay: 3,
+  maxDelay: 8,
+  concurrency: 1
+};
+let logHistory = [];
+
+// Helper to log messages
+function log(message, type = 'info') {
+  const timestamp = new Date().toLocaleTimeString();
+  const logEntry = { timestamp, message, type };
+  logHistory.push(logEntry);
+  // Keep last 200 logs
+  if (logHistory.length > 200) logHistory.shift();
+  
+  // Broadcast to Popup
+  chrome.runtime.sendMessage({ action: 'log_update', log: logEntry }).catch(() => {});
+  saveState();
+}
+
+// Save state to chrome.storage.local
+function saveState() {
+  chrome.storage.local.set({
+    downloadQueue,
+    activeIndex,
+    status,
+    settings,
+    logHistory
+  });
+}
+
+// Load state from chrome.storage.local
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.storage.local.get(['downloadQueue', 'activeIndex', 'status', 'settings', 'logHistory'], (result) => {
+    if (result.downloadQueue) downloadQueue = result.downloadQueue;
+    if (result.activeIndex !== undefined) activeIndex = result.activeIndex;
+    if (result.status) status = result.status;
+    if (result.settings) settings = { ...settings, ...result.settings };
+    if (result.logHistory) logHistory = result.logHistory;
+    
+    // If it was left running, reset to paused
+    if (status === 'running') {
+      status = 'paused';
+      saveState();
+    }
+  });
+});
+
+// Message listener from popup or content scripts
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'add_tasks') {
+    const newTasks = request.tasks.map(task => ({
+      ...task,
+      status: 'pending', // 'pending', 'downloading', 'completed', 'failed'
+      progress: 0,
+      error: null
+    }));
+    
+    // Add unique tasks by URL
+    const existingUrls = new Set(downloadQueue.map(t => t.url));
+    const added = [];
+    for (const task of newTasks) {
+      if (!existingUrls.has(task.url)) {
+        downloadQueue.push(task);
+        added.push(task);
+      }
+    }
+    
+    log(`成功添加 ${added.length} 个下载任务。当前队列总数: ${downloadQueue.length}`, 'success');
+    saveState();
+    sendResponse({ success: true, count: added.length });
+    
+    // Auto-start if idle
+    if (status === 'idle' || status === 'completed') {
+      startQueue();
+    }
+  } 
+  else if (request.action === 'start_queue') {
+    startQueue();
+    sendResponse({ success: true });
+  } 
+  else if (request.action === 'pause_queue') {
+    status = 'paused';
+    log('队列已暂停。', 'warning');
+    saveState();
+    sendResponse({ success: true });
+  } 
+  else if (request.action === 'clear_queue') {
+    downloadQueue = [];
+    activeIndex = -1;
+    status = 'idle';
+    logHistory = [];
+    log('队列已清空。', 'info');
+    saveState();
+    sendResponse({ success: true });
+  } 
+  else if (request.action === 'update_settings') {
+    settings = { ...settings, ...request.settings };
+    log(`设置已更新: 格式=${settings.format}, 延迟=${settings.minDelay}-${settings.maxDelay}s`, 'success');
+    saveState();
+    sendResponse({ success: true });
+  } 
+  else if (request.action === 'get_state') {
+    sendResponse({
+      downloadQueue,
+      activeIndex,
+      status,
+      settings,
+      logHistory
+    });
+  }
+  return true; // Keep message channel open for async response
+});
+
+// Queue controller
+async function startQueue() {
+  if (status === 'running') return;
+  status = 'running';
+  saveState();
+  log('开始执行下载队列...', 'info');
+  
+  while (status === 'running') {
+    // Find next pending task
+    const nextIndex = downloadQueue.findIndex(t => t.status === 'pending');
+    if (nextIndex === -1) {
+      status = 'completed';
+      log('所有下载任务已完成！', 'success');
+      saveState();
+      break;
+    }
+    
+    activeIndex = nextIndex;
+    downloadQueue[activeIndex].status = 'downloading';
+    saveState();
+    
+    const task = downloadQueue[activeIndex];
+    log(`正在下载 (${activeIndex + 1}/${downloadQueue.length}): ${task.title}`, 'info');
+    
+    try {
+      await downloadArticle(task);
+      downloadQueue[activeIndex].status = 'completed';
+      downloadQueue[activeIndex].progress = 100;
+      log(`下载完成: ${task.title}`, 'success');
+    } catch (error) {
+      console.error(error);
+      downloadQueue[activeIndex].status = 'failed';
+      downloadQueue[activeIndex].error = error.message || '未知错误';
+      log(`下载失败: ${task.title} (原因: ${downloadQueue[activeIndex].error})`, 'danger');
+    }
+    
+    saveState();
+    
+    // If there is another pending task and we are still running, wait before next task
+    const hasMore = downloadQueue.some(t => t.status === 'pending');
+    if (hasMore && status === 'running') {
+      const delaySec = Math.floor(Math.random() * (settings.maxDelay - settings.minDelay + 1)) + settings.minDelay;
+      log(`等待防封锁延迟，${delaySec} 秒后继续...`, 'info');
+      await new Promise(resolve => setTimeout(resolve, delaySec * 1000));
+    }
+  }
+}
+
+// Helper to decode HTML Entities (e.g. &amp;, &nbsp;)
+function decodeHTMLEntities(text) {
+  if (!text) return '';
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(dec));
+}
+
+// Robust function to extract `#js_content` from WeChat article HTML without DOMParser
+function extractJsContent(htmlText) {
+  const idIdx = htmlText.indexOf('id="js_content"');
+  if (idIdx === -1) return null;
+  
+  // Find the opening tag start '<' of the tag containing id="js_content"
+  let tagStartIdx = htmlText.lastIndexOf('<', idIdx);
+  if (tagStartIdx === -1) return null;
+  
+  // Find the closing '>' of that opening tag
+  let tagEndIdx = htmlText.indexOf('>', tagStartIdx);
+  if (tagEndIdx === -1) return null;
+  
+  let contentStartIdx = tagEndIdx + 1;
+  
+  // Trace nested tags to find matching </div>
+  let openDivs = 1;
+  let currentIdx = contentStartIdx;
+  
+  while (openDivs > 0 && currentIdx < htmlText.length) {
+    const nextOpen = htmlText.indexOf('<div', currentIdx);
+    const nextClose = htmlText.indexOf('</div>', currentIdx);
+    
+    if (nextClose === -1) {
+      // If no matching closing div, grab till the end of the text
+      return htmlText.substring(contentStartIdx);
+    }
+    
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      openDivs++;
+      currentIdx = nextOpen + 4;
+    } else {
+      openDivs--;
+      if (openDivs === 0) {
+        return htmlText.substring(contentStartIdx, nextClose);
+      }
+      currentIdx = nextClose + 6;
+    }
+  }
+  return null;
+}
+
+// Extract images elements using RegExp without DOMParser
+function extractImagesFromHtml(htmlText) {
+  const imgRegex = /<img\s+[^>]*>/gi;
+  const images = [];
+  let match;
+  
+  while ((match = imgRegex.exec(htmlText)) !== null) {
+    const imgTag = match[0];
+    
+    // Extract data-src or src attribute
+    const srcMatch = imgTag.match(/data-src\s*=\s*["']([^"']+)["']/i) || 
+                     imgTag.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
+                     
+    if (srcMatch && srcMatch[1] && srcMatch[1].startsWith('http')) {
+      // Force HTTPS to bypass Mixed Content restrictions and match Extension host permissions
+      const secureUrl = srcMatch[1].replace(/^http:/i, 'https:');
+      images.push({
+        tag: imgTag,
+        url: secureUrl
+      });
+    }
+  }
+  return images;
+}
+
+// Convert HTML content to Markdown without DOMParser
+function convertHtmlToMarkdown(htmlText, title, accountName, date, originalUrl) {
+  let md = htmlText;
+  
+  // Replace Headings
+  md = md.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n');
+  md = md.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n');
+  md = md.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n');
+  md = md.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n#### $1\n');
+  md = md.replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, '\n##### $1\n');
+  md = md.replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, '\n###### $1\n');
+  
+  // Replace Bold / Italic
+  md = md.replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, '**$1**');
+  md = md.replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, '**$1**');
+  md = md.replace(/<em[^>]*>([\s\S]*?)<\/em>/gi, '*$1*');
+  md = md.replace(/<i[^>]*>([\s\S]*?)<\/i>/gi, '*$1*');
+  
+  // Replace Paragraphs / Breaks
+  md = md.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n');
+  md = md.replace(/<br\s*\/?>/gi, '\n');
+  
+  // Replace Blockquotes
+  md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, '\n> $1\n');
+  
+  // Replace Links
+  md = md.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
+  
+  // Replace Images (which were rewritten in the caller)
+  md = md.replace(/<img[^>]*src=["']([^"']+)["'][^>]*>/gi, '\n![图片]($1)\n');
+  
+  // Strip all other HTML tags
+  md = md.replace(/<[^>]+>/g, '');
+  
+  // Decode HTML entities
+  md = decodeHTMLEntities(md);
+  
+  // Clean up excessive newlines
+  md = md.replace(/\n{3,}/g, '\n\n');
+  
+  // Append Frontmatter
+  const finalMd = `# ${title}\n\n` +
+    `- **公众号**: ${accountName}\n` +
+    `- **发表时间**: ${date}\n` +
+    `- **原文链接**: [阅读原文](${originalUrl})\n\n` +
+    `---\n\n` +
+    md.trim();
+    
+  return finalMd;
+}
+
+// Convert HTML content to plain TXT without DOMParser
+function convertHtmlToTxt(htmlText, title, accountName, date, originalUrl) {
+  let txt = htmlText;
+  
+  // Replace headings and paragraphs to ensure newlines/separations
+  txt = txt.replace(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi, '\n$1\n');
+  txt = txt.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n');
+  txt = txt.replace(/<br\s*\/?>/gi, '\n');
+  txt = txt.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, '\n$1\n');
+  txt = txt.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
+  
+  // Strip all other HTML tags
+  txt = txt.replace(/<[^>]+>/g, '');
+  
+  // Decode HTML entities
+  txt = decodeHTMLEntities(txt);
+  
+  // Clean up excessive newlines
+  txt = txt.replace(/\n{3,}/g, '\n\n');
+  
+  // Format layout
+  const finalTxt = `${title}\n` +
+    `公众号: ${accountName}\n` +
+    `发表时间: ${date}\n` +
+    `原文链接: ${originalUrl}\n` +
+    `========================================\n\n` +
+    txt.trim();
+    
+  return finalTxt;
+}
+
+// Download and parse WeChat article
+async function downloadArticle(task) {
+  // 1. Fetch Article HTML
+  let htmlText = '';
+  try {
+    const res = await fetch(task.url);
+    if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
+    htmlText = await res.text();
+  } catch (err) {
+    throw new Error(`无法获取文章内容: ${err.message}`);
+  }
+  
+  // 2. Parse HTML elements without DOMParser
+  const bodyHtml = extractJsContent(htmlText);
+  if (!bodyHtml) {
+    throw new Error('未找到文章正文内容 (#js_content)，可能链接无效或被限制访问');
+  }
+  
+  // Extract or Fallback Metadata
+  let title = task.title;
+  if (!title) {
+    const titleMatch = htmlText.match(/<h1[^>]*id="activity-name"[^>]*>([\s\S]*?)<\/h1>/i) ||
+                       htmlText.match(/<h1[^>]*class="[^"]*rich_media_title[^"]*"[^>]*>([\s\S]*?)<\/h1>/i) ||
+                       htmlText.match(/<h2[^>]*class="[^"]*rich_media_title[^"]*"[^>]*>([\s\S]*?)<\/h2>/i);
+    title = titleMatch ? decodeHTMLEntities(titleMatch[1].replace(/<[^>]+>/g, '').trim()) : '未命名文章';
+  }
+  
+  let accountName = task.accountName;
+  if (!accountName || accountName === '微信公众号' || accountName === '公众号') {
+    const accountMatch = htmlText.match(/<strong[^>]*class="[^"]*profile_nickname[^"]*"[^>]*>([\s\S]*?)<\/strong>/i) ||
+                         htmlText.match(/id="js_name"[^>]*>([\s\S]*?)<\/a>/i) ||
+                         htmlText.match(/nickname\s*=\s*['"]([^'"]+)['"]/i);
+    accountName = accountMatch ? decodeHTMLEntities(accountMatch[1].replace(/<[^>]+>/g, '').trim()) : '微信公众号';
+  }
+  
+  let date = task.date || '';
+  if (!date) {
+    const timeMatch = htmlText.match(/<em[^>]*id="publish_time"[^>]*>([\s\S]*?)<\/em>/i);
+    if (timeMatch && timeMatch[1].replace(/<[^>]+>/g, '').trim()) {
+      date = timeMatch[1].replace(/<[^>]+>/g, '').trim();
+    } else {
+      // Look in script variables for ct timestamp
+      const ctMatch = htmlText.match(/ct\s*=\s*['"](\d+)['"]/i) || 
+                      htmlText.match(/createTime\s*=\s*['"](\d+)['"]/i) ||
+                      htmlText.match(/ori_create_time\s*=\s*['"](\d+)['"]/i);
+                      
+      if (ctMatch && ctMatch[1]) {
+        const ts = parseInt(ctMatch[1]) * 1000;
+        date = new Date(ts).toISOString().split('T')[0];
+      } else {
+        // Try to match date format in script blocks
+        const dateMatch = htmlText.match(/publish_time\s*=\s*['"](\d{4}-\d{2}-\d{2})['"]/i) ||
+                          htmlText.match(/['"](\d{4}-\d{2}-\d{2})['"]/);
+        if (dateMatch) {
+          date = dateMatch[1];
+        } else {
+          date = new Date().toISOString().split('T')[0];
+        }
+      }
+    }
+  }
+  
+  // Sanitize Date
+  date = date.replace(/[\/\s:]/g, '-');
+  
+  // Update task metadata in the queue so the Popup list displays the correct name/date
+  if (downloadQueue[activeIndex]) {
+    downloadQueue[activeIndex].title = title;
+    downloadQueue[activeIndex].accountName = accountName;
+    downloadQueue[activeIndex].date = date;
+    saveState();
+  }
+  
+  // Sanitize Title for file name
+  const safeFilename = sanitizeFilename(`${accountName}-${title}-${date}`);
+  
+  // 3. Find and Localize Images
+  const images = extractImagesFromHtml(bodyHtml);
+  log(`文章包含 ${images.length} 张图片，准备下载...`, 'info');
+  
+  const downloadedImages = [];
+  let successImagesCount = 0;
+  
+  // Concurrently download images inside a single article (max 4 parallel fetches for assets)
+  const concurrencyLimit = 4;
+  for (let i = 0; i < images.length; i += concurrencyLimit) {
+    const chunk = images.slice(i, i + concurrencyLimit);
+    await Promise.all(chunk.map(async (imgInfo, offset) => {
+      const idx = i + offset;
+      const imgUrl = imgInfo.url;
+      try {
+        // Fetch image blob
+        const res = await fetch(imgUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        
+        // Determine file extension
+        let ext = 'png';
+        const contentType = res.headers.get('content-type');
+        if (contentType) {
+          if (contentType.includes('jpeg')) ext = 'jpg';
+          else if (contentType.includes('gif')) ext = 'gif';
+          else if (contentType.includes('webp')) ext = 'webp';
+          else if (contentType.includes('png')) ext = 'png';
+          else if (contentType.includes('svg')) ext = 'svg';
+        } else {
+          const urlObj = new URL(imgUrl);
+          const wxFmt = urlObj.searchParams.get('wx_fmt');
+          if (wxFmt) ext = wxFmt;
+        }
+        
+        const filename = `image_${idx + 1}.${ext}`;
+        const arrayBuffer = await blob.arrayBuffer();
+        
+        // Store download details
+        const base64Data = `data:${contentType || 'image/png'};base64,` + uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+        
+        downloadedImages.push({
+          originalUrl: imgUrl,
+          filename,
+          arrayBuffer,
+          base64Data,
+          contentType: contentType || `image/${ext}`
+        });
+        
+        successImagesCount++;
+        const percent = Math.round((successImagesCount / images.length) * 100);
+        updateTaskProgress(activeIndex, percent);
+      } catch (err) {
+        log(`图片下载失败 (${imgUrl}): ${err.message}`, 'warning');
+      }
+    }));
+  }
+  
+  log(`图片抓取完成: 成功 ${successImagesCount}/${images.length} 张`, 'success');
+  
+  // 4. Reconstruct HTML with local images or Base64 images
+  let finalBodyHtml = bodyHtml;
+  for (const imgInfo of images) {
+    const downloadedImg = downloadedImages.find(d => d.originalUrl === imgInfo.url);
+    let newTag = '';
+    if (downloadedImg) {
+      if (settings.format === 'single_html') {
+        newTag = `<img src="${downloadedImg.base64Data}" style="max-width: 100%; height: auto; display: block; margin: 16px auto; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);" />`;
+      } else {
+        newTag = `<img src="images/${downloadedImg.filename}" style="max-width: 100%; height: auto; display: block; margin: 16px auto; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);" />`;
+      }
+    } else {
+      // Fallback to online image
+      newTag = `<img src="${imgInfo.url}" style="max-width: 100%; height: auto; display: block; margin: 16px auto; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);" />`;
+    }
+    
+    // Replace the exact tag instance
+    finalBodyHtml = finalBodyHtml.replace(imgInfo.tag, newTag);
+  }
+  
+  // 5. Generate package based on target format
+  if (settings.format === 'zip_html') {
+    const cleanedHtml = buildHtmlPage(title, accountName, date, task.url, finalBodyHtml);
+    
+    // Create ZIP
+    const zip = new JSZip();
+    zip.file('index.html', cleanedHtml);
+    
+    const imgFolder = zip.folder('images');
+    for (const img of downloadedImages) {
+      imgFolder.file(img.filename, img.arrayBuffer);
+    }
+    
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    await triggerDownload(zipBlob, `${safeFilename}.zip`);
+  } 
+  else if (settings.format === 'zip_md') {
+    const markdownContent = convertHtmlToMarkdown(finalBodyHtml, title, accountName, date, task.url);
+    
+    const zip = new JSZip();
+    zip.file(`${safeFilename}.md`, markdownContent);
+    
+    const imgFolder = zip.folder('images');
+    for (const img of downloadedImages) {
+      imgFolder.file(img.filename, img.arrayBuffer);
+    }
+    
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    await triggerDownload(zipBlob, `${safeFilename}.zip`);
+  } 
+  else if (settings.format === 'single_html') {
+    const cleanedHtml = buildHtmlPage(title, accountName, date, task.url, finalBodyHtml);
+    const htmlBlob = new Blob([cleanedHtml], { type: 'text/html;charset=utf-8' });
+    await triggerDownload(htmlBlob, `${safeFilename}.html`);
+  } 
+  else if (settings.format === 'txt') {
+    const txtContent = convertHtmlToTxt(finalBodyHtml, title, accountName, date, task.url);
+    const txtBlob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
+    await triggerDownload(txtBlob, `${safeFilename}.txt`);
+  }
+}
+
+// Wrap content in beautiful template
+function buildHtmlPage(title, accountName, date, originalUrl, bodyHtml) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+  <style>
+    body {
+      font-family: -apple-system-font, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", Arial, sans-serif;
+      background-color: #f9f9f9;
+      color: #333;
+      line-height: 1.6;
+      padding: 0;
+      margin: 0;
+    }
+    .container {
+      background-color: #fff;
+      padding: 32px 24px;
+      max-width: 677px;
+      margin: 0 auto;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .article-header {
+      margin-bottom: 24px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 20px;
+    }
+    .article-title {
+      font-size: 24px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 14px 0;
+      color: #111;
+    }
+    .article-meta {
+      font-size: 15px;
+      color: #999;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .account-name {
+      color: #576b95;
+      font-weight: 600;
+    }
+    .publish-date {
+      color: #888;
+    }
+    .original-link a {
+      color: #576b95;
+      text-decoration: none;
+    }
+    .original-link a:hover {
+      text-decoration: underline;
+    }
+    /* Content formatting */
+    #js_content {
+      visibility: visible !important;
+      word-wrap: break-word;
+      font-size: 16px;
+    }
+    img {
+      max-width: 100% !important;
+      height: auto !important;
+      display: block;
+      margin: 16px auto;
+      border-radius: 4px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+    }
+    p {
+      margin: 0 0 16px 0;
+    }
+    blockquote {
+      margin: 16px 0;
+      padding: 12px 16px;
+      border-left: 4px solid #d3d3d3;
+      background-color: #f6f6f6;
+      color: #666;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="article-header">
+      <h1 class="article-title">${title}</h1>
+      <div class="article-meta">
+        <span class="account-name">${accountName}</span>
+        <span class="publish-date">${date}</span>
+        <span class="original-link"><a href="${originalUrl}" target="_blank">阅读原文</a></span>
+      </div>
+    </div>
+    <div id="js_content">
+      ${bodyHtml}
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+// Convert blob to DataURL and trigger downloads
+async function triggerDownload(blob, filename) {
+  // Convert blob to ArrayBuffer, then Base64
+  const arrayBuffer = await blob.arrayBuffer();
+  const base64 = uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+  
+  // Format DataURL based on extension
+  let mimeType = 'application/octet-stream';
+  if (filename.endsWith('.zip')) mimeType = 'application/zip';
+  else if (filename.endsWith('.html')) mimeType = 'text/html';
+  else if (filename.endsWith('.txt')) mimeType = 'text/plain';
+  
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download({
+      url: dataUrl,
+      filename: filename,
+      conflictAction: 'overwrite',
+      saveAs: false
+    }, (downloadId) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        // Monitor download completion
+        const checkStatus = (delta) => {
+          if (delta.id === downloadId && delta.state) {
+            if (delta.state.current === 'complete') {
+              chrome.downloads.onChanged.removeListener(checkStatus);
+              resolve(downloadId);
+            } else if (delta.state.current === 'interrupted') {
+              chrome.downloads.onChanged.removeListener(checkStatus);
+              reject(new Error('下载被中断'));
+            }
+          }
+        };
+        chrome.downloads.onChanged.addListener(checkStatus);
+      }
+    });
+  });
+}
+
+// Helper to update progress in storage
+function updateTaskProgress(idx, progress) {
+  if (downloadQueue[idx]) {
+    downloadQueue[idx].progress = progress;
+    chrome.runtime.sendMessage({ action: 'progress_update', index: idx, progress }).catch(() => {});
+  }
+}
+
+// File name sanitation
+function sanitizeFilename(name) {
+  return name
+    .replace(/[\\/:*?"<>|]/g, '-') // Replace illegal characters with a hyphen
+    .replace(/-+/g, '-')           // Collapse consecutive hyphens
+    .replace(/_+/g, '_')           // Collapse consecutive underscores
+    .trim()
+    .substring(0, 120);
+}
+
+// Binary-to-base64 converter
+function uint8ArrayToBase64(uint8Array) {
+  const CHUNK_SIZE = 0x8000; // 32KB
+  let index = 0;
+  const length = uint8Array.length;
+  let result = '';
+  while (index < length) {
+    const slice = uint8Array.subarray(index, Math.min(index + CHUNK_SIZE, length));
+    result += String.fromCharCode.apply(null, slice);
+    index += CHUNK_SIZE;
+  }
+  return btoa(result);
+}

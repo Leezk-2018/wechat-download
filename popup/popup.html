@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>微信文章批量下载器</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo">
+          <img src="../icons/icon128.png" alt="logo">
+        </div>
+        <div class="brand-text">
+          <h1>微信文章下载助手</h1>
+          <p>Manifest V3 批量导出工具</p>
+        </div>
+      </div>
+      <div class="status-badge" id="queue-status">闲置</div>
+    </header>
+
+    <!-- Settings Card -->
+    <section class="card settings-card">
+      <div class="card-header">
+        <h2>🛠️ 选项设置</h2>
+      </div>
+      <div class="settings-grid">
+        <div class="setting-item">
+          <label for="setting-format">保存格式</label>
+          <select id="setting-format">
+            <option value="zip_html">HTML + 本地图片 ZIP (推荐)</option>
+            <option value="zip_md">Markdown + 本地图片 ZIP</option>
+            <option value="single_html">单文件 HTML (图片 Base64)</option>
+            <option value="txt">纯文本 TXT (无图片)</option>
+          </select>
+        </div>
+        <div class="setting-item">
+          <label>抓取间隔 (秒)</label>
+          <div class="delay-range">
+            <input type="number" id="setting-min-delay" min="1" max="60" value="3">
+            <span>至</span>
+            <input type="number" id="setting-max-delay" min="2" max="120" value="8">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Controls -->
+    <section class="controls-panel">
+      <button class="btn btn-primary" id="btn-toggle-queue">
+        <svg viewBox="0 0 24 24" class="btn-icon" id="play-icon">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+        <span id="btn-toggle-text">开始下载</span>
+      </button>
+      <button class="btn btn-secondary" id="btn-clear-queue">
+        <svg viewBox="0 0 24 24" class="btn-icon">
+          <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+        </svg>
+        <span>清空队列</span>
+      </button>
+    </section>
+
+    <!-- Progress Overview -->
+    <section class="card progress-card" id="progress-overview-container" style="display: none;">
+      <div class="progress-details">
+        <span id="current-task-title" class="task-title-trunc">正在初始化...</span>
+        <span id="current-task-percent">0%</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-bar" id="current-task-bar"></div>
+      </div>
+    </section>
+
+    <!-- Tabs Header -->
+    <div class="tabs-header">
+      <button class="tab-btn active" data-tab="tab-tasks">任务列表 (<span id="task-count">0</span>)</button>
+      <button class="tab-btn" data-tab="tab-logs">运行日志</button>
+    </div>
+
+    <!-- Tabs Content -->
+    <div class="tabs-content">
+      <!-- Tasks Tab -->
+      <div class="tab-panel active" id="tab-tasks">
+        <div class="empty-state" id="tasks-empty">
+          <svg viewBox="0 0 24 24">
+            <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10H7v-2h10v2zm0-4H7V7h10v2zm0 8H7v-2h10v2z"/>
+          </svg>
+          <p>暂无下载任务</p>
+          <p class="subtitle">请在微信公众号后台勾选文章进行添加</p>
+        </div>
+        <div class="task-list" id="task-list" style="display: none;">
+          <!-- Inject dynamic tasks here -->
+        </div>
+      </div>
+
+      <!-- Logs Tab -->
+      <div class="tab-panel" id="tab-logs">
+        <div class="log-console" id="log-console">
+          <!-- Inject logs here -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <span>微信公众号文章批量下载插件</span>
+      <span>v1.0.0</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
