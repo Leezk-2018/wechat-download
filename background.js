@@ -331,8 +331,341 @@ function convertHtmlToTxt(htmlText, title, accountName, date, originalUrl) {
   return finalTxt;
 }
 
-// Download and parse WeChat article
+// Recursive helper to find note data in state object
+function findNoteDataInState(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  
+  // Check if it's the target note object
+  if (obj.title !== undefined && (obj.desc !== undefined || obj.descInfo !== undefined) && (obj.imageList || obj.images)) {
+    return obj;
+  }
+  
+  // Recursively search
+  for (const key in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      const res = findNoteDataInState(obj[key]);
+      if (res) return res;
+    }
+  }
+  return null;
+}
+
+// Recursive helper to find a key inside an object
+function findKeyInObject(obj, targetKey) {
+  if (!obj || typeof obj !== 'object') return null;
+  if (obj[targetKey] !== undefined) return obj[targetKey];
+  
+  for (const key in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      const res = findKeyInObject(obj[key], targetKey);
+      if (res) return res;
+    }
+  }
+  return null;
+}
+
+// Download and parse Xiaohongshu note
+async function downloadXhsNote(task) {
+  // 1. Fetch page HTML
+  let htmlText = '';
+  try {
+    const res = await fetch(task.url);
+    if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
+    htmlText = await res.text();
+  } catch (err) {
+    throw new Error(`无法获取笔记内容: ${err.message}`);
+  }
+  
+  let title = task.title;
+  let desc = '';
+  let imageUrls = [];
+  let videoUrl = '';
+  let creatorName = task.accountName || '';
+  let publishTime = task.date || '';
+  
+  // 2. Try parsing __INITIAL_STATE__ first
+  const stateMatch = htmlText.match(/window\s*\.\s*__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})(?:;|<\/script>)/) ||
+                     htmlText.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})(?:;|<\/script>)/);
+                     
+  let parsedSuccess = false;
+  if (stateMatch) {
+    try {
+      let stateStr = stateMatch[1].trim();
+      const stateObj = JSON.parse(stateStr);
+      
+      const noteData = findNoteDataInState(stateObj);
+      if (noteData) {
+        title = noteData.title || title;
+        desc = noteData.desc || '';
+        
+        // Extract images
+        if (Array.isArray(noteData.imageList)) {
+          for (const img of noteData.imageList) {
+            const url = img.urlOriginal || img.urlDefault || img.url;
+            if (url) imageUrls.push(url.replace(/^http:/i, 'https:'));
+          }
+        } else if (Array.isArray(noteData.images)) {
+          for (const img of noteData.images) {
+            const url = img.url || img.src || img.urlOriginal;
+            if (url) imageUrls.push(url.replace(/^http:/i, 'https:'));
+          }
+        }
+        
+        // Extract video (if any)
+        if (noteData.video) {
+          const videoStream = findKeyInObject(noteData.video, 'masterUrl') || 
+                              findKeyInObject(noteData.video, 'url');
+          if (videoStream && typeof videoStream === 'string' && videoStream.startsWith('http')) {
+            videoUrl = videoStream.replace(/^http:/i, 'https:');
+          }
+        }
+        
+        // Extract creator/user
+        if (noteData.user) {
+          creatorName = noteData.user.nickname || creatorName;
+        } else if (noteData.author) {
+          creatorName = noteData.author.nickname || creatorName;
+        }
+        
+        // Extract time
+        if (noteData.time) {
+          const rawTime = noteData.time;
+          if (typeof rawTime === 'number') {
+            publishTime = new Date(rawTime).toISOString().split('T')[0];
+          } else if (typeof rawTime === 'string') {
+            publishTime = rawTime.split(' ')[0];
+          }
+        } else if (noteData.lastUpdateTime || noteData.updateTime || noteData.createTime) {
+          const rawTime = noteData.lastUpdateTime || noteData.updateTime || noteData.createTime;
+          if (typeof rawTime === 'number') {
+            const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
+            publishTime = new Date(ts).toISOString().split('T')[0];
+          } else if (typeof rawTime === 'string') {
+            publishTime = rawTime.split(' ')[0];
+          }
+        }
+        
+        parsedSuccess = true;
+      }
+    } catch (e) {
+      console.error('Failed to parse XHS state JSON:', e);
+    }
+  }
+  
+  // 3. Fallback to HTML meta tags and body parsing
+  if (!parsedSuccess || !desc) {
+    const titleMatch = htmlText.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i) ||
+                       htmlText.match(/<meta\s+name=["']og:title["']\s+content=["']([^"']+)["']/i) ||
+                       htmlText.match(/<title>([\s\S]*?)<\/title>/i);
+    if (titleMatch) {
+      title = decodeHTMLEntities(titleMatch[1].replace('- 小红书', '').replace('_小红书', '').trim());
+    }
+    
+    const descMatch = htmlText.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i) ||
+                      htmlText.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+    if (descMatch) {
+      desc = decodeHTMLEntities(descMatch[1].trim());
+    }
+    
+    if (imageUrls.length === 0) {
+      const ogImgMatch = htmlText.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+      if (ogImgMatch) {
+        imageUrls.push(ogImgMatch[1].replace(/^http:/i, 'https:'));
+      }
+      
+      const imgRegex = /<img\s+[^>]*src=["']([^"']+)["']/gi;
+      let match;
+      while ((match = imgRegex.exec(htmlText)) !== null) {
+        const src = match[1];
+        if (src.includes('xhscdn.com') && !src.includes('avatar') && !imageUrls.includes(src)) {
+          imageUrls.push(src.replace(/^http:/i, 'https:'));
+        }
+      }
+    }
+  }
+  
+  if (!creatorName) creatorName = '小红书创作者';
+  if (!publishTime) publishTime = new Date().toISOString().split('T')[0];
+  
+  publishTime = publishTime.replace(/[\/\s:]/g, '-');
+  
+  // Update task info in queue
+  if (downloadQueue[activeIndex]) {
+    downloadQueue[activeIndex].title = title;
+    downloadQueue[activeIndex].accountName = creatorName;
+    downloadQueue[activeIndex].date = publishTime;
+    saveState();
+  }
+  
+  const safeFilename = sanitizeFilename(`${creatorName}-${title}-${publishTime}`);
+  
+  // 4. Download Images
+  log(`笔记包含 ${imageUrls.length} 张图片，准备下载...`, 'info');
+  const downloadedImages = [];
+  let successImagesCount = 0;
+  
+  const concurrencyLimit = 4;
+  for (let i = 0; i < imageUrls.length; i += concurrencyLimit) {
+    const chunk = imageUrls.slice(i, i + concurrencyLimit);
+    await Promise.all(chunk.map(async (imgUrl, offset) => {
+      const idx = i + offset;
+      try {
+        const res = await fetch(imgUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        
+        let ext = 'png';
+        const contentType = res.headers.get('content-type');
+        if (contentType) {
+          if (contentType.includes('jpeg')) ext = 'jpg';
+          else if (contentType.includes('gif')) ext = 'gif';
+          else if (contentType.includes('webp')) ext = 'webp';
+          else if (contentType.includes('png')) ext = 'png';
+        }
+        
+        const filename = `image_${idx + 1}.${ext}`;
+        const arrayBuffer = await blob.arrayBuffer();
+        const base64Data = `data:${contentType || 'image/png'};base64,` + uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+        
+        downloadedImages.push({
+          originalUrl: imgUrl,
+          filename,
+          arrayBuffer,
+          base64Data,
+          contentType: contentType || `image/${ext}`
+        });
+        
+        successImagesCount++;
+        const percent = Math.round((successImagesCount / imageUrls.length) * 100);
+        updateTaskProgress(activeIndex, percent);
+      } catch (err) {
+        log(`图片下载失败 (${imgUrl}): ${err.message}`, 'warning');
+      }
+    }));
+  }
+  
+  log(`图片抓取完成: 成功 ${successImagesCount}/${imageUrls.length} 张`, 'success');
+  
+  // 5. Download Video (if videoUrl is present)
+  let videoBlob = null;
+  if (videoUrl) {
+    try {
+      log(`检测到视频内容，准备下载视频...`, 'info');
+      const res = await fetch(videoUrl);
+      if (res.ok) {
+        videoBlob = await res.blob();
+        log(`视频下载成功！`, 'success');
+      } else {
+        log(`视频下载失败: HTTP ${res.status}`, 'warning');
+      }
+    } catch (err) {
+      log(`视频下载失败: ${err.message}`, 'warning');
+    }
+  }
+  
+  // 6. Generate formats
+  let htmlContent = '';
+  if (videoUrl && videoBlob) {
+    if (settings.format === 'single_html') {
+      const videoBuffer = await videoBlob.arrayBuffer();
+      const videoBase64 = `data:${videoBlob.type || 'video/mp4'};base64,` + uint8ArrayToBase64(new Uint8Array(videoBuffer));
+      htmlContent += `<div class="video-container" style="max-width: 100%; margin: 16px auto; text-align: center;">
+        <video src="${videoBase64}" controls style="max-width: 100%; max-height: 500px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);"></video>
+      </div>`;
+    } else {
+      htmlContent += `<div class="video-container" style="max-width: 100%; margin: 16px auto; text-align: center;">
+        <video src="video.mp4" controls style="max-width: 100%; max-height: 500px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);"></video>
+      </div>`;
+    }
+  }
+  
+  if (downloadedImages.length > 0) {
+    htmlContent += `<div class="image-gallery" style="display: flex; flex-direction: column; gap: 16px; margin: 20px auto; max-width: 100%;">`;
+    for (const img of downloadedImages) {
+      const imgSrc = (settings.format === 'single_html') ? img.base64Data : `images/${img.filename}`;
+      htmlContent += `<img src="${imgSrc}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); display: block; margin: 0 auto;" />`;
+    }
+    htmlContent += `</div>`;
+  }
+  
+  const formattedDesc = desc
+    .split('\n')
+    .map(line => `<p style="margin: 0 0 12px 0; font-size: 16px; color: #333; line-height: 1.6; white-space: pre-wrap;">${line}</p>`)
+    .join('');
+    
+  htmlContent += `<div class="note-description" style="margin-top: 24px; padding-top: 20px; border-top: 1px dashed #eee;">${formattedDesc}</div>`;
+  
+  if (settings.format === 'zip_html') {
+    const cleanedHtml = buildHtmlPage(title, creatorName, publishTime, task.url, htmlContent);
+    const zip = new JSZip();
+    zip.file('index.html', cleanedHtml);
+    
+    const imgFolder = zip.folder('images');
+    for (const img of downloadedImages) {
+      imgFolder.file(img.filename, img.arrayBuffer);
+    }
+    
+    if (videoBlob && videoUrl) {
+      const videoBuffer = await videoBlob.arrayBuffer();
+      zip.file('video.mp4', videoBuffer);
+    }
+    
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    await triggerDownload(zipBlob, `${safeFilename}.zip`);
+  } 
+  else if (settings.format === 'zip_md') {
+    let md = '';
+    for (const img of downloadedImages) {
+      md += `![图片](images/${img.filename})\n\n`;
+    }
+    if (videoUrl) {
+      md += `[视频链接](${videoUrl})\n\n`;
+    }
+    md += desc;
+    
+    const markdownContent = convertHtmlToMarkdown(md, title, creatorName, publishTime, task.url);
+    
+    const zip = new JSZip();
+    zip.file(`${safeFilename}.md`, markdownContent);
+    
+    const imgFolder = zip.folder('images');
+    for (const img of downloadedImages) {
+      imgFolder.file(img.filename, img.arrayBuffer);
+    }
+    
+    if (videoBlob && videoUrl) {
+      const videoBuffer = await videoBlob.arrayBuffer();
+      zip.file('video.mp4', videoBuffer);
+    }
+    
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    await triggerDownload(zipBlob, `${safeFilename}.zip`);
+  } 
+  else if (settings.format === 'single_html') {
+    const cleanedHtml = buildHtmlPage(title, creatorName, publishTime, task.url, htmlContent);
+    const htmlBlob = new Blob([cleanedHtml], { type: 'text/html;charset=utf-8' });
+    await triggerDownload(htmlBlob, `${safeFilename}.html`);
+  } 
+  else if (settings.format === 'txt') {
+    const txtContent = `${title}\n` +
+      `作者: ${creatorName}\n` +
+      `发表时间: ${publishTime}\n` +
+      `原文链接: ${task.url}\n` +
+      `========================================\n\n` +
+      (videoUrl ? `[视频链接] ${videoUrl}\n\n` : '') +
+      desc.trim();
+      
+    const txtBlob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
+    await triggerDownload(txtBlob, `${safeFilename}.txt`);
+  }
+}
+
+// Download and parse WeChat/Xiaohongshu article
 async function downloadArticle(task) {
+  if (task.url.includes('xiaohongshu.com') || task.type === 'xhs') {
+    return downloadXhsNote(task);
+  }
+
   // 1. Fetch Article HTML
   let htmlText = '';
   try {

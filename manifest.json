@@ -12,7 +12,10 @@
   "host_permissions": [
     "https://mp.weixin.qq.com/*",
     "*://*.qpic.cn/*",
-    "*://*.qpic.com.cn/*"
+    "*://*.qpic.com.cn/*",
+    "https://creator.xiaohongshu.com/*",
+    "https://www.xiaohongshu.com/*",
+    "*://*.xhscdn.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -24,6 +27,18 @@
       ],
       "js": [
         "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "https://creator.xiaohongshu.com/*"
+      ],
+      "js": [
+        "content/xhs_content.js"
       ],
       "css": [
         "content/content.css"
