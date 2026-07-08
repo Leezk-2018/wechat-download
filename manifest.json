@@ -31,7 +31,8 @@
       "css": [
         "content/content.css"
       ],
-      "run_at": "document_end"
+      "run_at": "document_end",
+      "all_frames": true
     },
     {
       "matches": [
@@ -43,7 +44,8 @@
       "css": [
         "content/content.css"
       ],
-      "run_at": "document_end"
+      "run_at": "document_end",
+      "all_frames": true
     }
   ],
   "action": {

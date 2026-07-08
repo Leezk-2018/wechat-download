@@ -314,7 +314,7 @@ function createFloatingBar() {
   
   floatingBar = document.createElement('div');
   floatingBar.id = 'wx-download-floating-panel';
-  floatingBar.className = 'wx-download-floating-bar hidden';
+  floatingBar.className = 'wx-download-floating-bar';
   
   floatingBar.innerHTML = `
     <div class="wx-download-floating-bar-header">
@@ -372,8 +372,9 @@ function updateFloatingBarUI() {
   const downloadBtn = document.getElementById('wx-btn-download');
   const selectAllBtn = document.getElementById('wx-btn-select-all');
   
+  floatingBar.classList.remove('hidden');
+  
   if (allInjected.length > 0) {
-    floatingBar.classList.remove('hidden');
     infoEl.textContent = `已检测到本页 ${allInjected.length} 篇发表文章。已选中 ${checked.length} 篇。`;
     downloadBtn.disabled = checked.length === 0;
     downloadBtn.textContent = `批量下载 (${checked.length})`;
@@ -384,8 +385,10 @@ function updateFloatingBarUI() {
       selectAllBtn.textContent = '全选本页';
     }
   } else {
-    // If no articles found, keep hidden
-    floatingBar.classList.add('hidden');
+    infoEl.textContent = `正在扫描页面上的已发表文章... (未检测到可下载内容)`;
+    downloadBtn.disabled = true;
+    downloadBtn.textContent = `批量下载 (0)`;
+    selectAllBtn.textContent = '全选本页';
   }
 }
 

@@ -12,7 +12,7 @@ function init() {
   // Inject floating panel
   createFloatingBar();
   
-  // Start periodic scanner (since Xiaohongshu creator dashboard is a dynamic React SPA)
+  // Start periodic scanner
   scanInterval = setInterval(scanArticles, 1500);
   
   // Initial scan
@@ -59,9 +59,9 @@ function getCreatorName() {
 }
 
 // Heuristics to find note title
-function getNoteTitle(link, container) {
-  // 1. Try link text first
-  let text = link.textContent.trim();
+function getNoteTitle(el, container) {
+  // 1. Try element text first (if it's a link with text)
+  let text = el.textContent.trim();
   if (text && text.length > 2 && !['编辑', '数据', '复制', '删除', '详情', '查看'].some(w => text.includes(w))) {
     return text;
   }
@@ -144,22 +144,46 @@ function getNoteDate(container) {
 
 // Scan the page DOM for Xiaohongshu note items
 function scanArticles() {
-  const links = document.querySelectorAll('a');
-  let newArticlesFound = false;
   const currentUrls = new Set();
   
+  // 1. Scan by data attributes (very common in React/AntD tables and lists)
+  const elementsWithId = document.querySelectorAll('[data-row-key], [data-id], [data-note-id], [data-key]');
+  elementsWithId.forEach(el => {
+    const potentialId = el.getAttribute('data-row-key') || 
+                        el.getAttribute('data-id') || 
+                        el.getAttribute('data-note-id') || 
+                        el.getAttribute('data-key');
+                        
+    if (potentialId && /^[0-9a-zA-Z_-]{20,32}$/.test(potentialId)) {
+      const cleanUrl = `https://www.xiaohongshu.com/explore/${potentialId}`;
+      currentUrls.add(cleanUrl);
+      
+      if (el.dataset.xhsDownloadInjected) return;
+      
+      const container = el;
+      const title = getNoteTitle(el, container);
+      const date = getNoteDate(container);
+      
+      el.dataset.xhsDownloadInjected = 'true';
+      el.dataset.xhsTitle = title;
+      el.dataset.xhsUrl = cleanUrl;
+      el.dataset.xhsDate = date;
+      
+      injectCheckboxToContainer(el, container, cleanUrl, title, date);
+    }
+  });
+  
+  // 2. Scan by links (fallback/supplement)
+  const links = document.querySelectorAll('a');
   links.forEach(link => {
     let url = link.getAttribute('href');
     if (!url) return;
     
     let noteId = null;
-    
-    // Check 1: Standard public explore/discovery URL
     const publicMatch = url.match(/(?:explore|discovery\/item)\/([0-9a-zA-Z_-]{20,32})/i);
     if (publicMatch) {
       noteId = publicMatch[1];
     } else {
-      // Check 2: Creator edit / detail URL which includes ID parameter
       const creatorMatch = url.match(/[?&]id=([0-9a-zA-Z_-]{20,32})/i);
       const isNoteLink = url.includes('/publish/') || url.includes('/note-detail') || url.includes('/note-manager');
       if (creatorMatch && isNoteLink) {
@@ -170,14 +194,10 @@ function scanArticles() {
     if (!noteId) return;
     
     const cleanUrl = `https://www.xiaohongshu.com/explore/${noteId}`;
-    
-    // Avoid double-processing the same note item on the same page
-    if (currentUrls.has(cleanUrl)) return;
     currentUrls.add(cleanUrl);
     
     if (link.dataset.xhsDownloadInjected) return;
     
-    // Find container element
     const container = link.closest('.ant-table-row') || 
                       link.closest('tr') || 
                       link.closest('.note-item') || 
@@ -186,7 +206,6 @@ function scanArticles() {
                       link.closest('[class*="item"]') || 
                       link.parentElement?.parentElement;
                       
-    // Extract metadata
     const title = getNoteTitle(link, container);
     const date = getNoteDate(container);
     
@@ -195,22 +214,21 @@ function scanArticles() {
     link.dataset.xhsUrl = cleanUrl;
     link.dataset.xhsDate = date;
     
-    // Inject Checkbox
-    injectCheckbox(link, container);
-    newArticlesFound = true;
+    injectCheckbox(link, container, cleanUrl, title, date);
   });
   
-  // Update counts on panel
-  const allInjected = document.querySelectorAll('a[data-xhs-download-injected="true"]');
-  if (allInjected.length !== lastDetectedCount) {
-    lastDetectedCount = allInjected.length;
+  // Update counts
+  const allCheckboxes = document.querySelectorAll('.wx-download-checkbox');
+  if (allCheckboxes.length !== lastDetectedCount) {
+    lastDetectedCount = allCheckboxes.length;
     updateFloatingBarUI();
   }
 }
 
 // Inject checkbox next to link element
-function injectCheckbox(linkEl, container) {
-  if (linkEl.parentNode.classList.contains('xhs-download-checkbox-wrapper-parent')) return;
+function injectCheckbox(linkEl, container, url, title, date) {
+  if (linkEl.parentNode.classList.contains('xhs-download-checkbox-wrapper-parent') ||
+      linkEl.parentNode.querySelector('.wx-download-checkbox-wrapper')) return;
   
   const wrapper = document.createElement('span');
   wrapper.className = 'wx-download-checkbox-wrapper';
@@ -218,6 +236,11 @@ function injectCheckbox(linkEl, container) {
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.className = 'wx-download-checkbox';
+  
+  // Store metadata directly on checkbox for decoupled retrieval
+  checkbox.dataset.xhsUrl = url;
+  checkbox.dataset.xhsTitle = title;
+  checkbox.dataset.xhsDate = date;
   
   checkbox.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -233,13 +256,59 @@ function injectCheckbox(linkEl, container) {
   }
 }
 
+// Inject checkbox to table row or grid card
+function injectCheckboxToContainer(el, container, url, title, date) {
+  if (el.classList.contains('xhs-download-checkbox-wrapper-parent') || 
+      el.querySelector('.wx-download-checkbox-wrapper')) return;
+      
+  const wrapper = document.createElement('span');
+  wrapper.className = 'wx-download-checkbox-wrapper';
+  wrapper.style.marginRight = '8px';
+  wrapper.style.display = 'inline-flex';
+  wrapper.style.alignItems = 'center';
+  
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'wx-download-checkbox';
+  
+  // Store metadata directly on checkbox for decoupled retrieval
+  checkbox.dataset.xhsUrl = url;
+  checkbox.dataset.xhsTitle = title;
+  checkbox.dataset.xhsDate = date;
+  
+  checkbox.addEventListener('click', (e) => {
+    e.stopPropagation();
+    updateFloatingBarUI();
+  });
+  
+  wrapper.appendChild(checkbox);
+  
+  // If it's a table row, find the first td cell and prepend
+  if (el.tagName.toLowerCase() === 'tr') {
+    const firstCell = el.querySelector('td');
+    if (firstCell) {
+      firstCell.insertBefore(wrapper, firstCell.firstChild);
+    } else {
+      el.insertBefore(wrapper, el.firstChild);
+    }
+  } else {
+    // Grid cards
+    el.insertBefore(wrapper, el.firstChild);
+  }
+  
+  el.classList.add('xhs-download-checkbox-wrapper-parent');
+  if (container) {
+    container.classList.add('wx-download-article-highlight');
+  }
+}
+
 // Create the floating panel
 function createFloatingBar() {
   if (document.getElementById('wx-download-floating-panel')) return;
   
   floatingBar = document.createElement('div');
   floatingBar.id = 'wx-download-floating-panel';
-  floatingBar.className = 'wx-download-floating-bar hidden';
+  floatingBar.className = 'wx-download-floating-bar'; // Visible by default to confirm extension is running
   
   floatingBar.innerHTML = `
     <div class="wx-download-floating-bar-header">
@@ -276,9 +345,34 @@ function createFloatingBar() {
   // Custom styles for Xiaohongshu theme
   const style = document.createElement('style');
   style.textContent = `
+    .wx-download-checkbox {
+      appearance: none !important;
+      -webkit-appearance: none !important;
+      width: 18px !important;
+      height: 18px !important;
+      border: 2px solid #ccc !important;
+      border-radius: 4px !important;
+      outline: none !important;
+      transition: all 0.2s ease !important;
+      cursor: pointer !important;
+      display: inline-block !important;
+      position: relative !important;
+      background-color: #fff !important;
+    }
     .wx-download-checkbox:checked {
       background-color: #ff2442 !important;
       border-color: #ff2442 !important;
+    }
+    .wx-download-checkbox:checked::after {
+      content: '' !important;
+      position: absolute !important;
+      left: 5px !important;
+      top: 1px !important;
+      width: 5px !important;
+      height: 9px !important;
+      border: solid white !important;
+      border-width: 0 2px 2px 0 !important;
+      transform: rotate(45deg) !important;
     }
     .wx-download-checkbox:hover {
       border-color: #ff2442 !important;
@@ -308,32 +402,36 @@ function createFloatingBar() {
   document.getElementById('wx-btn-select-all').addEventListener('click', toggleSelectAll);
   document.getElementById('wx-btn-download').addEventListener('click', startBatchDownload);
   
-  updateFloatingBarProgress();
+  updateFloatingBarUI();
 }
 
 // Updates floating bar UI
 function updateFloatingBarUI() {
   if (!floatingBar) return;
   
-  const allInjected = document.querySelectorAll('a[data-xhs-download-injected="true"]');
+  const allCheckboxes = document.querySelectorAll('.wx-download-checkbox');
   const checked = document.querySelectorAll('.wx-download-checkbox:checked');
   const infoEl = document.getElementById('wx-download-info');
   const downloadBtn = document.getElementById('wx-btn-download');
   const selectAllBtn = document.getElementById('wx-btn-select-all');
   
-  if (allInjected.length > 0) {
-    floatingBar.classList.remove('hidden');
-    infoEl.textContent = `已检测到本页 ${allInjected.length} 篇笔记。已选中 ${checked.length} 篇。`;
+  floatingBar.classList.remove('hidden');
+  
+  if (allCheckboxes.length > 0) {
+    infoEl.textContent = `已检测到本页 ${allCheckboxes.length} 篇笔记。已选中 ${checked.length} 篇。`;
     downloadBtn.disabled = checked.length === 0;
     downloadBtn.textContent = `批量下载 (${checked.length})`;
     
-    if (checked.length === allInjected.length && allInjected.length > 0) {
+    if (checked.length === allCheckboxes.length && allCheckboxes.length > 0) {
       selectAllBtn.textContent = '取消全选';
     } else {
       selectAllBtn.textContent = '全选本页';
     }
   } else {
-    floatingBar.classList.add('hidden');
+    infoEl.textContent = `正在扫描页面上的笔记... (未检测到可下载内容)`;
+    downloadBtn.disabled = true;
+    downloadBtn.textContent = `批量下载 (0)`;
+    selectAllBtn.textContent = '全选本页';
   }
 }
 
@@ -357,14 +455,11 @@ async function startBatchDownload() {
   const creatorName = getCreatorName();
   
   checkedBoxes.forEach(cb => {
-    const wrapper = cb.closest('.wx-download-checkbox-wrapper');
-    if (!wrapper) return;
-    const linkEl = wrapper.nextElementSibling;
-    if (linkEl && linkEl.dataset.xhsDownloadInjected === 'true') {
+    if (cb.dataset.xhsUrl) {
       tasks.push({
-        url: linkEl.dataset.xhsUrl,
-        title: linkEl.dataset.xhsTitle,
-        date: linkEl.dataset.xhsDate,
+        url: cb.dataset.xhsUrl,
+        title: cb.dataset.xhsTitle,
+        date: cb.dataset.xhsDate || '',
         accountName: creatorName,
         type: 'xhs'
       });
