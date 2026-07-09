@@ -7,48 +7,6 @@ let floatingBar = null;
 let scanInterval = null;
 let lastDetectedCount = 0;
 
-// Detailed logger to inspect Vue properties on .note-card
-function debugVueProperties() {
-  try {
-    const cards = document.querySelectorAll('.note-card');
-    if (cards.length > 0) {
-      const card = cards[0];
-      const keys = Object.getOwnPropertyNames(card);
-      console.log('[XHS DEBUG] Found note-card, DOM keys:', keys);
-      
-      keys.forEach(k => {
-        if (k.includes('vue') || k.includes('react') || k.startsWith('__')) {
-          const val = card[k];
-          console.log(`[XHS DEBUG] Property "${k}" type: ${typeof val}`, val);
-          
-          if (val && typeof val === 'object') {
-            console.log(`[XHS DEBUG] Property "${k}" keys:`, Object.keys(val));
-            
-            // Check potential note objects inside it
-            if (val.props) {
-              console.log(`[XHS DEBUG] Property "${k}".props:`, val.props);
-              console.log(`[XHS DEBUG] Property "${k}".props keys:`, Object.keys(val.props));
-            }
-            if (val.setupState) {
-              console.log(`[XHS DEBUG] Property "${k}".setupState:`, val.setupState);
-            }
-            if (val.ctx) {
-              console.log(`[XHS DEBUG] Property "${k}".ctx keys:`, Object.keys(val.ctx));
-            }
-            if (val.memoizedProps) {
-              console.log(`[XHS DEBUG] Property "${k}".memoizedProps:`, val.memoizedProps);
-            }
-          }
-        }
-      });
-    } else {
-      console.log('[XHS DEBUG] No elements with class .note-card found.');
-    }
-  } catch (e) {
-    console.error('[XHS DEBUG] Error in debugVueProperties:', e);
-  }
-}
-
 // Diagnostic reporter
 function runDiagnosticReport() {
   try {
@@ -84,10 +42,6 @@ function init() {
   
   runDiagnosticReport();
   setInterval(runDiagnosticReport, 5000);
-  
-  // Debug Vue properties on note cards
-  setInterval(debugVueProperties, 4000);
-  setTimeout(debugVueProperties, 2000);
   
   scanInterval = setInterval(scanArticles, 1500);
   scanArticles();
@@ -140,12 +94,11 @@ function getNoteTitle(el, container) {
   }
   
   if (container) {
-    const img = container.querySelector('img');
-    if (img && img.alt && img.alt.trim().length > 2) {
-      return img.alt.trim();
-    }
-    
-    const titleEl = container.querySelector('[class*="title"], [class*="name"], [class*="desc"], [class*="content"]');
+    const titleEl = container.querySelector('.note-card__title') || 
+                    container.querySelector('[class*="title"]') || 
+                    container.querySelector('[class*="name"]') || 
+                    container.querySelector('[class*="desc"]') || 
+                    container.querySelector('[class*="content"]');
     if (titleEl && titleEl.textContent.trim().length > 2) {
       const txt = titleEl.textContent.trim();
       if (!['编辑', '数据', '复制', '删除', '详情', '查看'].some(w => txt.includes(w))) {
@@ -153,19 +106,14 @@ function getNoteTitle(el, container) {
       }
     }
     
+    const img = container.querySelector('img');
+    if (img && img.alt && img.alt.trim().length > 2) {
+      return img.alt.trim();
+    }
+    
     const heading = container.querySelector('h3, h4, h5');
     if (heading && heading.textContent.trim().length > 2) {
       return heading.textContent.trim();
-    }
-    
-    const divs = container.querySelectorAll('div, span, p');
-    for (const d of divs) {
-      if (d.children.length === 0) {
-        const txt = d.textContent.trim();
-        if (txt.length > 4 && txt.length < 100 && !['编辑', '数据', '复制', '删除', '详情', '查看'].some(w => txt.includes(w))) {
-          return txt;
-        }
-      }
     }
   }
   
@@ -218,6 +166,58 @@ function getNoteDate(container) {
   }
   
   return '';
+}
+
+// Recursive helper to find and rank candidate note IDs in a note container
+function findNoteIdInContainer(container) {
+  const noteIdRegex = /\b[0-9a-f]{24}\b/gi;
+  const candidates = [];
+  
+  const addCandidate = (id, priority) => {
+    id = id.toLowerCase();
+    const existing = candidates.find(c => c.id === id);
+    if (existing) {
+      if (priority > existing.priority) existing.priority = priority;
+    } else {
+      candidates.push({ id, priority });
+    }
+  };
+  
+  const checkStr = (str, priority) => {
+    if (!str) return;
+    let match;
+    noteIdRegex.lastIndex = 0;
+    while ((match = noteIdRegex.exec(str)) !== null) {
+      addCandidate(match[0], priority);
+    }
+  };
+  
+  const priorityAttributes = ['data-row-key', 'data-id', 'data-note-id', 'key', 'id', 'data-impression'];
+  const elements = container.querySelectorAll('*');
+  [container, ...Array.from(elements)].forEach(el => {
+    if (el.attributes) {
+      for (let i = 0; i < el.attributes.length; i++) {
+        const attrName = el.attributes[i].name.toLowerCase();
+        const attrVal = el.attributes[i].value;
+        if (priorityAttributes.includes(attrName) || attrName.includes('key') || attrName.includes('id') || attrName.includes('impression')) {
+          checkStr(attrVal, 3);
+        } else {
+          checkStr(attrVal, 1);
+        }
+      }
+    }
+    if (el.href) {
+      if (el.href.includes('explore') || el.href.includes('discovery')) {
+        checkStr(el.href, 2);
+      } else {
+        checkStr(el.href, 1);
+      }
+    }
+    if (el.src) checkStr(el.src, 1);
+  });
+  
+  candidates.sort((a, b) => b.priority - a.priority);
+  return candidates.map(c => c.id);
 }
 
 // Helper to check if a props object contains note data
@@ -325,39 +325,16 @@ function getNotePropsFromElement(el) {
 function scanArticles() {
   const noteContainers = new Map(); // container -> { id, title, date, url }
   
-  // Method 1: React/Vue internal properties scanning (primary method)
-  const candidates = document.querySelectorAll('img, tr, td, div, span, p');
-  candidates.forEach(el => {
-    const noteObj = getNotePropsFromElement(el);
-    if (noteObj) {
-      const id = noteObj.id || noteObj.noteId || noteObj.note_id || noteObj.id_str;
-      const container = el.closest('.note-card') ||
-                        el.closest('.ant-table-row') || 
-                        el.closest('tr') || 
-                        el.closest('.note-item') || 
-                        el.closest('.card') || 
-                        el.closest('[class*="note"]') || 
-                        el.closest('[class*="item"]') || 
-                        el.parentElement?.parentElement || 
-                        el;
-                        
-      if (noteContainers.has(container)) return;
+  // Method 1: Scan by class .note-card (Primary method for XHS)
+  const cards = document.querySelectorAll('.note-card');
+  cards.forEach(card => {
+    const ids = findNoteIdInContainer(card);
+    if (ids.length > 0) {
+      const id = ids[0];
+      const title = getNoteTitle(null, card);
+      const date = getNoteDate(card);
       
-      const title = noteObj.title || noteObj.desc || getNoteTitle(null, container);
-      
-      let date = '';
-      const rawTime = noteObj.time || noteObj.publishTime || noteObj.createTime || noteObj.lastUpdateTime || noteObj.updateTime;
-      if (rawTime) {
-        if (typeof rawTime === 'number') {
-          const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
-          date = new Date(ts).toISOString().split('T')[0];
-        } else if (typeof rawTime === 'string') {
-          date = rawTime.split(' ')[0];
-        }
-      }
-      if (!date) date = getNoteDate(container);
-      
-      noteContainers.set(container, {
+      noteContainers.set(card, {
         id,
         title,
         date,
@@ -366,82 +343,61 @@ function scanArticles() {
     }
   });
   
-  // Method 2: Fallback scanning by action buttons (only if Vue/React scan found nothing)
+  // Method 2: Scan by data attributes (fallback)
   if (noteContainers.size === 0) {
-    const allElements = document.querySelectorAll('*');
-    const actionButtons = Array.from(allElements).filter(el => {
-      const text = el.textContent.trim();
-      return ['复制链接', '编辑', '数据分析', '数据', '删除', 'Copy Link', 'Edit', 'Analytics'].includes(text);
-    });
-    
-    actionButtons.forEach(btn => {
-      let container = btn;
-      while (container.parentElement) {
-        const parent = container.parentElement;
-        const buttonsInParent = actionButtons.filter(b => parent.contains(b));
-        if (buttonsInParent.length > 1) {
-          break;
-        }
-        container = parent;
-      }
-      
-      if (!noteContainers.has(container)) {
-        const ids = findNoteIdInContainer(container);
-        if (ids.length > 0) {
-          const id = ids[0];
-          const title = getNoteTitle(null, container);
-          const date = getNoteDate(container);
-          
-          noteContainers.set(container, {
-            id,
-            title,
-            date,
-            url: `https://www.xiaohongshu.com/explore/${id}`
-          });
-        }
+    const elementsWithId = document.querySelectorAll('[data-row-key], [data-id], [data-note-id], [data-key]');
+    elementsWithId.forEach(el => {
+      const potentialId = el.getAttribute('data-row-key') || 
+                          el.getAttribute('data-id') || 
+                          el.getAttribute('data-note-id') ||
+                          el.getAttribute('data-key');
+                          
+      if (potentialId && /^[0-9a-zA-Z_-]{20,32}$/.test(potentialId)) {
+        const cleanUrl = `https://www.xiaohongshu.com/explore/${potentialId}`;
+        const container = el.closest('.note-card') || el.closest('tr') || el;
+        if (noteContainers.has(container)) return;
+        
+        const title = getNoteTitle(null, container);
+        const date = getNoteDate(container);
+        
+        noteContainers.set(container, {
+          id: potentialId,
+          title,
+          date,
+          url: cleanUrl
+        });
       }
     });
   }
   
-  // Method 3: Fallback scanning by links
+  // Method 3: Scan by React/Vue internal properties (fallback)
   if (noteContainers.size === 0) {
-    const links = document.querySelectorAll('a');
-    links.forEach(link => {
-      let url = link.getAttribute('href');
-      if (!url) return;
-      
-      let noteId = null;
-      const publicMatch = url.match(/(?:explore|discovery\/item)\/([0-9a-zA-Z_-]{20,32})/i);
-      if (publicMatch) {
-        noteId = publicMatch[1];
-      } else {
-        const creatorMatch = url.match(/[?&]id=([0-9a-zA-Z_-]{20,32})/i);
-        const isNoteLink = url.includes('/publish/') || url.includes('/note-detail') || url.includes('/note-manager');
-        if (creatorMatch && isNoteLink) {
-          noteId = creatorMatch[1];
+    const candidates = document.querySelectorAll('img, tr, td, div, span, p');
+    candidates.forEach(el => {
+      const noteObj = getNotePropsFromElement(el);
+      if (noteObj) {
+        const id = noteObj.id || noteObj.noteId || noteObj.note_id || noteObj.id_str;
+        const container = el.closest('.note-card') || el.closest('tr') || el;
+        if (noteContainers.has(container)) return;
+        
+        const title = noteObj.title || noteObj.desc || getNoteTitle(null, container);
+        let date = '';
+        const rawTime = noteObj.time || noteObj.publishTime || noteObj.createTime || noteObj.lastUpdateTime || noteObj.updateTime;
+        if (rawTime) {
+          if (typeof rawTime === 'number') {
+            const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
+            date = new Date(ts).toISOString().split('T')[0];
+          } else if (typeof rawTime === 'string') {
+            date = rawTime.split(' ')[0];
+          }
         }
-      }
-      
-      if (!noteId) return;
-      
-      const container = link.closest('.ant-table-row') || 
-                        link.closest('tr') || 
-                        link.closest('.note-item') || 
-                        link.closest('.card') || 
-                        link.closest('[class*="note"]') || 
-                        link.closest('[class*="item"]') || 
-                        link.parentElement?.parentElement || 
-                        link;
-                        
-      if (!noteContainers.has(container)) {
-        const title = getNoteTitle(link, container);
-        const date = getNoteDate(container);
+        if (!date) date = getNoteDate(container);
         
         noteContainers.set(container, {
-          id: noteId,
+          id,
           title,
           date,
-          url: `https://www.xiaohongshu.com/explore/${noteId}`
+          url: `https://www.xiaohongshu.com/explore/${id}`
         });
       }
     });
@@ -476,58 +432,6 @@ function scanArticles() {
   }
 }
 
-// Recursive helper to find and rank candidate note IDs in a note container
-function findNoteIdInContainer(container) {
-  const noteIdRegex = /\b[0-9a-f]{24}\b/gi;
-  const candidates = [];
-  
-  const addCandidate = (id, priority) => {
-    id = id.toLowerCase();
-    const existing = candidates.find(c => c.id === id);
-    if (existing) {
-      if (priority > existing.priority) existing.priority = priority;
-    } else {
-      candidates.push({ id, priority });
-    }
-  };
-  
-  const checkStr = (str, priority) => {
-    if (!str) return;
-    let match;
-    noteIdRegex.lastIndex = 0;
-    while ((match = noteIdRegex.exec(str)) !== null) {
-      addCandidate(match[0], priority);
-    }
-  };
-  
-  const priorityAttributes = ['data-row-key', 'data-id', 'data-note-id', 'key', 'id'];
-  const elements = container.querySelectorAll('*');
-  [container, ...Array.from(elements)].forEach(el => {
-    if (el.attributes) {
-      for (let i = 0; i < el.attributes.length; i++) {
-        const attrName = el.attributes[i].name.toLowerCase();
-        const attrVal = el.attributes[i].value;
-        if (priorityAttributes.includes(attrName) || attrName.includes('key') || attrName.includes('id')) {
-          checkStr(attrVal, 3);
-        } else {
-          checkStr(attrVal, 1);
-        }
-      }
-    }
-    if (el.href) {
-      if (el.href.includes('explore') || el.href.includes('discovery')) {
-        checkStr(el.href, 2);
-      } else {
-        checkStr(el.href, 1);
-      }
-    }
-    if (el.src) checkStr(el.src, 1);
-  });
-  
-  candidates.sort((a, b) => b.priority - a.priority);
-  return candidates.map(c => c.id);
-}
-
 // Inject checkbox next to link element
 function injectCheckbox(linkEl, container, url, title, date) {
   if (linkEl.parentNode.classList.contains('xhs-download-checkbox-wrapper-parent') ||
@@ -558,7 +462,7 @@ function injectCheckbox(linkEl, container, url, title, date) {
   }
 }
 
-// Inject checkbox to table row or grid card
+// Inject checkbox to table row or grid card (placed inside title group if available)
 function injectCheckboxToContainer(el, container, url, title, date) {
   if (el.classList.contains('xhs-download-checkbox-wrapper-parent') || 
       el.querySelector('.wx-download-checkbox-wrapper')) return;
@@ -568,6 +472,7 @@ function injectCheckboxToContainer(el, container, url, title, date) {
   wrapper.style.marginRight = '8px';
   wrapper.style.display = 'inline-flex';
   wrapper.style.alignItems = 'center';
+  wrapper.style.verticalAlign = 'middle';
   
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
@@ -584,7 +489,10 @@ function injectCheckboxToContainer(el, container, url, title, date) {
   
   wrapper.appendChild(checkbox);
   
-  if (el.tagName.toLowerCase() === 'tr') {
+  const titleGroup = el.querySelector('.note-card__title-group');
+  if (titleGroup) {
+    titleGroup.insertBefore(wrapper, titleGroup.firstChild);
+  } else if (el.tagName.toLowerCase() === 'tr') {
     const firstCell = el.querySelector('td');
     if (firstCell) {
       firstCell.insertBefore(wrapper, firstCell.firstChild);
