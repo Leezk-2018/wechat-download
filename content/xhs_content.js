@@ -1,6 +1,5 @@
 // Content Script for Xiaohongshu Creator Platform (creator.xiaohongshu.com)
 
-// IMMEDIATE DIAGNOSTIC LOG (Executed as soon as script loads)
 console.log('[XHS DEBUG] xhs_content.js loaded successfully at: ' + window.location.href);
 console.log('[XHS DEBUG] Window Details: parent is ' + (window.parent === window ? 'self' : 'parent') + ', top is ' + (window.top === window ? 'self' : 'top'));
 
@@ -8,7 +7,7 @@ let floatingBar = null;
 let scanInterval = null;
 let lastDetectedCount = 0;
 
-// Diagnostic reporter that logs DOM details to console
+// Diagnostic reporter
 function runDiagnosticReport() {
   try {
     const report = {
@@ -22,7 +21,6 @@ function runDiagnosticReport() {
       potentialNoteCards: document.querySelectorAll('[class*="note"], [class*="card"], [class*="item"]').length
     };
     
-    // Sample some button texts
     const buttons = Array.from(document.querySelectorAll('button, a, span, div'))
       .filter(el => el.children.length === 0 && el.textContent.trim().length > 0 && el.textContent.trim().length < 15)
       .map(el => el.textContent.trim());
@@ -40,20 +38,14 @@ function runDiagnosticReport() {
 function init() {
   log('小红书笔记批量下载器已激活');
   
-  // Inject floating panel
   createFloatingBar();
   
-  // Run diagnostics immediately and then every 5 seconds
   runDiagnosticReport();
   setInterval(runDiagnosticReport, 5000);
   
-  // Start periodic scanner
   scanInterval = setInterval(scanArticles, 1500);
-  
-  // Initial scan
   scanArticles();
   
-  // Listen for progress updates from background to show in floating bar
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'log_update' || request.action === 'progress_update') {
       updateFloatingBarProgress();
@@ -81,7 +73,6 @@ function getCreatorName() {
     }
   }
   
-  // Fallback to page title
   const title = document.title;
   const cleanTitle = title
     .replace('小红书创作者服务平台', '')
@@ -103,13 +94,11 @@ function getNoteTitle(el, container) {
   }
   
   if (container) {
-    // 1. Try image alt inside the container
     const img = container.querySelector('img');
     if (img && img.alt && img.alt.trim().length > 2) {
       return img.alt.trim();
     }
     
-    // 2. Try selectors with "title", "name", "desc", "content"
     const titleEl = container.querySelector('[class*="title"], [class*="name"], [class*="desc"], [class*="content"]');
     if (titleEl && titleEl.textContent.trim().length > 2) {
       const txt = titleEl.textContent.trim();
@@ -118,13 +107,11 @@ function getNoteTitle(el, container) {
       }
     }
     
-    // 3. Try h3, h4, h5 headings
     const heading = container.querySelector('h3, h4, h5');
     if (heading && heading.textContent.trim().length > 2) {
       return heading.textContent.trim();
     }
     
-    // 4. Text content fallback
     const divs = container.querySelectorAll('div, span, p');
     for (const d of divs) {
       if (d.children.length === 0) {
@@ -143,7 +130,6 @@ function getNoteTitle(el, container) {
 function getNoteDate(container) {
   if (!container) return '';
   
-  // 1. Look for specific classes containing time/date/publish
   const dateEl = container.querySelector('[class*="time"], [class*="date"], [class*="publish"]');
   if (dateEl) {
     const text = dateEl.textContent.trim();
@@ -164,7 +150,6 @@ function getNoteDate(container) {
     }
   }
   
-  // 2. Traverse all text nodes for date patterns
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
   let node;
   while (node = walker.nextNode()) {
@@ -187,6 +172,219 @@ function getNoteDate(container) {
   }
   
   return '';
+}
+
+// Helper to check if a props object contains note data
+function checkPropsForNote(props) {
+  if (!props || typeof props !== 'object') return null;
+  
+  let noteObj = null;
+  if (props.note && typeof props.note === 'object' && (props.note.id || props.note.noteId || props.note.note_id)) {
+    noteObj = props.note;
+  } else if (props.record && typeof props.record === 'object' && (props.record.id || props.record.noteId || props.record.note_id)) {
+    noteObj = props.record;
+  } else if (props.item && typeof props.item === 'object' && (props.item.id || props.item.noteId || props.item.note_id)) {
+    noteObj = props.item;
+  } else if (props.data && typeof props.data === 'object' && (props.data.id || props.data.noteId || props.data.note_id)) {
+    noteObj = props.data;
+  } else if (props.id && typeof props.id === 'string' && props.id.length === 24) {
+    noteObj = props;
+  } else if (props.noteId && typeof props.noteId === 'string' && props.noteId.length === 24) {
+    noteObj = props;
+  }
+  
+  if (noteObj) {
+    const id = noteObj.id || noteObj.noteId || noteObj.note_id;
+    if (id && typeof id === 'string' && id.length === 24) {
+      return noteObj;
+    }
+  }
+  return null;
+}
+
+// Extract note props from DOM element using React fiber properties
+function getNotePropsFromElement(el) {
+  const keys = Object.keys(el);
+  const propsKey = keys.find(k => k.startsWith('__reactProps$'));
+  const fiberKey = keys.find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+  
+  // 1. Try __reactProps$ directly
+  if (propsKey && el[propsKey]) {
+    const props = el[propsKey];
+    const res = checkPropsForNote(props);
+    if (res) return res;
+  }
+  
+  // 2. Try climbing the React Fiber tree
+  if (fiberKey && el[fiberKey]) {
+    let node = el[fiberKey];
+    while (node) {
+      const props = node.memoizedProps || node.pendingProps;
+      if (props) {
+        const res = checkPropsForNote(props);
+        if (res) return res;
+      }
+      node = node.return;
+    }
+  }
+  
+  return null;
+}
+
+// Scan the page DOM for Xiaohongshu note items
+function scanArticles() {
+  const noteContainers = new Map(); // container -> { id, title, date, url }
+  
+  // Method 1: React internal properties scanning (primary method)
+  const candidates = document.querySelectorAll('img, tr, td, div, span, p');
+  candidates.forEach(el => {
+    const noteObj = getNotePropsFromElement(el);
+    if (noteObj) {
+      const id = noteObj.id || noteObj.noteId || noteObj.note_id;
+      const container = el.closest('.ant-table-row') || 
+                        el.closest('tr') || 
+                        el.closest('.note-item') || 
+                        el.closest('.card') || 
+                        el.closest('[class*="note"]') || 
+                        el.closest('[class*="item"]') || 
+                        el.parentElement?.parentElement || 
+                        el;
+                        
+      if (noteContainers.has(container)) return;
+      
+      const title = noteObj.title || noteObj.desc || getNoteTitle(null, container);
+      
+      let date = '';
+      const rawTime = noteObj.time || noteObj.publishTime || noteObj.createTime || noteObj.lastUpdateTime || noteObj.updateTime;
+      if (rawTime) {
+        if (typeof rawTime === 'number') {
+          const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
+          date = new Date(ts).toISOString().split('T')[0];
+        } else if (typeof rawTime === 'string') {
+          date = rawTime.split(' ')[0];
+        }
+      }
+      if (!date) date = getNoteDate(container);
+      
+      noteContainers.set(container, {
+        id,
+        title,
+        date,
+        url: `https://www.xiaohongshu.com/explore/${id}`
+      });
+    }
+  });
+  
+  // Method 2: Fallback scanning by action buttons
+  if (noteContainers.size === 0) {
+    const allElements = document.querySelectorAll('*');
+    const actionButtons = Array.from(allElements).filter(el => {
+      if (el.children.length > 0) return false;
+      const text = el.textContent.trim();
+      return ['复制链接', '编辑', '数据分析', '数据', '删除', 'Copy Link', 'Edit', 'Analytics'].includes(text);
+    });
+    
+    actionButtons.forEach(btn => {
+      let container = btn;
+      while (container.parentElement) {
+        const parent = container.parentElement;
+        const buttonsInParent = actionButtons.filter(b => parent.contains(b));
+        if (buttonsInParent.length > 1) {
+          break;
+        }
+        container = parent;
+      }
+      
+      if (!noteContainers.has(container)) {
+        // Scan the container for any 24-character hexadecimal ID
+        const ids = findNoteIdInContainer(container);
+        if (ids.length > 0) {
+          const id = ids[0];
+          const title = getNoteTitle(null, container);
+          const date = getNoteDate(container);
+          
+          noteContainers.set(container, {
+            id,
+            title,
+            date,
+            url: `https://www.xiaohongshu.com/explore/${id}`
+          });
+        }
+      }
+    });
+  }
+  
+  // Method 3: Fallback scanning by links
+  if (noteContainers.size === 0) {
+    const links = document.querySelectorAll('a');
+    links.forEach(link => {
+      let url = link.getAttribute('href');
+      if (!url) return;
+      
+      let noteId = null;
+      const publicMatch = url.match(/(?:explore|discovery\/item)\/([0-9a-zA-Z_-]{20,32})/i);
+      if (publicMatch) {
+        noteId = publicMatch[1];
+      } else {
+        const creatorMatch = url.match(/[?&]id=([0-9a-zA-Z_-]{20,32})/i);
+        const isNoteLink = url.includes('/publish/') || url.includes('/note-detail') || url.includes('/note-manager');
+        if (creatorMatch && isNoteLink) {
+          noteId = creatorMatch[1];
+        }
+      }
+      
+      if (!noteId) return;
+      
+      const container = link.closest('.ant-table-row') || 
+                        link.closest('tr') || 
+                        link.closest('.note-item') || 
+                        link.closest('.card') || 
+                        link.closest('[class*="note"]') || 
+                        link.closest('[class*="item"]') || 
+                        link.parentElement?.parentElement || 
+                        link;
+                        
+      if (!noteContainers.has(container)) {
+        const title = getNoteTitle(link, container);
+        const date = getNoteDate(container);
+        
+        noteContainers.set(container, {
+          id: noteId,
+          title,
+          date,
+          url: `https://www.xiaohongshu.com/explore/${noteId}`
+        });
+      }
+    });
+  }
+  
+  // Inject checkboxes
+  let injectCount = 0;
+  noteContainers.forEach((note, container) => {
+    const { id, url, title, date } = note;
+    
+    if (container.dataset.xhsDownloadInjected) {
+      const cb = container.querySelector('.wx-download-checkbox');
+      if (cb) {
+        cb.dataset.xhsUrl = url;
+        cb.dataset.xhsTitle = title;
+        cb.dataset.xhsDate = date;
+      }
+      return;
+    }
+    
+    container.dataset.xhsDownloadInjected = 'true';
+    injectCheckboxToContainer(container, container, url, title, date);
+    injectCount++;
+  });
+  
+  // Update counts
+  const allCheckboxes = document.querySelectorAll('.wx-download-checkbox');
+  if (allCheckboxes.length !== lastDetectedCount) {
+    lastDetectedCount = allCheckboxes.length;
+    updateFloatingBarUI();
+    log(`扫描完成: 找到 ${noteContainers.size} 个唯一笔记容器, 新注入 ${injectCount} 个复选框, 当前总计 ${allCheckboxes.length} 个`);
+  }
 }
 
 // Recursive helper to find and rank candidate note IDs in a note container
@@ -213,7 +411,6 @@ function findNoteIdInContainer(container) {
     }
   };
   
-  // Priority 3: Key attributes
   const priorityAttributes = ['data-row-key', 'data-id', 'data-note-id', 'key', 'id'];
   const elements = container.querySelectorAll('*');
   [container, ...Array.from(elements)].forEach(el => {
@@ -238,155 +435,8 @@ function findNoteIdInContainer(container) {
     if (el.src) checkStr(el.src, 1);
   });
   
-  // Sort candidates by priority descending
   candidates.sort((a, b) => b.priority - a.priority);
   return candidates.map(c => c.id);
-}
-
-// Scan the page DOM for Xiaohongshu note items
-function scanArticles() {
-  // 1. Find all action triggers (this represents the individual note cards or rows)
-  const allElements = document.querySelectorAll('*');
-  const actionButtons = Array.from(allElements).filter(el => {
-    if (el.children.length > 0) return false; // Leaf nodes only
-    const text = el.textContent.trim();
-    return ['复制链接', '编辑', '数据分析', '数据', '删除', 'Copy Link', 'Edit', 'Analytics'].includes(text);
-  });
-  
-  if (actionButtons.length === 0) {
-    // If no action buttons, try simple link scanning as fallback
-    scanArticlesByLinks();
-    return;
-  }
-  
-  // 2. Resolve the visual container representing each note card/row
-  const noteContainers = [];
-  actionButtons.forEach(btn => {
-    let container = btn;
-    while (container.parentElement) {
-      const parent = container.parentElement;
-      const buttonsInParent = actionButtons.filter(b => parent.contains(b));
-      if (buttonsInParent.length > 1) {
-        break; // Stop climbing, we hit the list parent wrapper
-      }
-      container = parent;
-    }
-    if (!noteContainers.includes(container)) {
-      noteContainers.push(container);
-    }
-  });
-  
-  // 3. Find and rank candidate IDs in each container
-  const containerIdMaps = [];
-  const idCounts = {};
-  
-  noteContainers.forEach(container => {
-    const ids = findNoteIdInContainer(container);
-    containerIdMaps.push({ container, ids });
-    ids.forEach(id => {
-      idCounts[id] = (idCounts[id] || 0) + 1;
-    });
-  });
-  
-  // Filter out IDs shared by all containers (like the user ID)
-  const sharedIds = new Set();
-  const totalContainers = noteContainers.length;
-  for (const id in idCounts) {
-    if (idCounts[id] >= totalContainers && totalContainers > 1) {
-      sharedIds.add(id);
-    }
-  }
-  
-  // 4. Inject checkboxes for each note
-  let injectCount = 0;
-  containerIdMaps.forEach(({ container, ids }) => {
-    const specificIds = ids.filter(id => !sharedIds.has(id));
-    if (specificIds.length > 0) {
-      const noteId = specificIds[0];
-      const cleanUrl = `https://www.xiaohongshu.com/explore/${noteId}`;
-      const title = getNoteTitle(null, container);
-      const date = getNoteDate(container);
-      
-      if (container.dataset.xhsDownloadInjected) {
-        const cb = container.querySelector('.wx-download-checkbox');
-        if (cb) {
-          cb.dataset.xhsUrl = cleanUrl;
-          cb.dataset.xhsTitle = title;
-          cb.dataset.xhsDate = date;
-        }
-        return;
-      }
-      
-      container.dataset.xhsDownloadInjected = 'true';
-      injectCheckboxToContainer(container, container, cleanUrl, title, date);
-      injectCount++;
-    }
-  });
-  
-  // Update counts
-  const allCheckboxes = document.querySelectorAll('.wx-download-checkbox');
-  if (allCheckboxes.length !== lastDetectedCount) {
-    lastDetectedCount = allCheckboxes.length;
-    updateFloatingBarUI();
-    log(`扫描完成: 找到 ${noteContainers.length} 个笔记卡片, 新注入 ${injectCount} 个复选框, 当前总计 ${allCheckboxes.length} 个`);
-  }
-}
-
-// Fallback: Scan by links
-function scanArticlesByLinks() {
-  const links = document.querySelectorAll('a');
-  const currentUrls = new Set();
-  let injectCount = 0;
-  
-  links.forEach(link => {
-    let url = link.getAttribute('href');
-    if (!url) return;
-    
-    let noteId = null;
-    const publicMatch = url.match(/(?:explore|discovery\/item)\/([0-9a-zA-Z_-]{20,32})/i);
-    if (publicMatch) {
-      noteId = publicMatch[1];
-    } else {
-      const creatorMatch = url.match(/[?&]id=([0-9a-zA-Z_-]{20,32})/i);
-      const isNoteLink = url.includes('/publish/') || url.includes('/note-detail') || url.includes('/note-manager');
-      if (creatorMatch && isNoteLink) {
-        noteId = creatorMatch[1];
-      }
-    }
-    
-    if (!noteId) return;
-    
-    const cleanUrl = `https://www.xiaohongshu.com/explore/${noteId}`;
-    currentUrls.add(cleanUrl);
-    
-    if (link.dataset.xhsDownloadInjected) return;
-    
-    const container = link.closest('.ant-table-row') || 
-                      link.closest('tr') || 
-                      link.closest('.note-item') || 
-                      link.closest('.card') || 
-                      link.closest('[class*="note"]') || 
-                      link.closest('[class*="item"]') || 
-                      link.parentElement?.parentElement;
-                      
-    const title = getNoteTitle(link, container);
-    const date = getNoteDate(container);
-    
-    link.dataset.xhsDownloadInjected = 'true';
-    link.dataset.xhsTitle = title;
-    link.dataset.xhsUrl = cleanUrl;
-    link.dataset.xhsDate = date;
-    
-    injectCheckbox(link, container, cleanUrl, title, date);
-    injectCount++;
-  });
-  
-  const allCheckboxes = document.querySelectorAll('.wx-download-checkbox');
-  if (allCheckboxes.length !== lastDetectedCount) {
-    lastDetectedCount = allCheckboxes.length;
-    updateFloatingBarUI();
-    log(`链接兜底扫描完成: 新注入 ${injectCount} 个复选框, 当前总计 ${allCheckboxes.length} 个`);
-  }
 }
 
 // Inject checkbox next to link element
@@ -502,7 +552,6 @@ function createFloatingBar() {
     </div>
   `;
   
-  // Custom styles for Xiaohongshu theme
   const style = document.createElement('style');
   style.textContent = `
     .wx-download-checkbox {
@@ -553,7 +602,6 @@ function createFloatingBar() {
   
   document.body.appendChild(floatingBar);
   
-  // Event listeners
   floatingBar.querySelector('.wx-download-floating-bar-close').addEventListener('click', () => {
     floatingBar.classList.add('hidden');
     clearInterval(scanInterval);
