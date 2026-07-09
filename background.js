@@ -598,40 +598,7 @@ async function downloadXhsNote(task) {
     fetchSuccess = true;
   }
   
-  // 1. Try to fetch from creator APIs first (in case it works)
-  const apiNoteData = !fetchSuccess ? await fetchFromCreatorApi(noteId) : null;
-  if (apiNoteData) {
-    title = getCleanTitle(apiNoteData.title || apiNoteData.display_title || apiNoteData.content || apiNoteData.desc || title, title);
-    desc = getCleanDesc(apiNoteData.desc || apiNoteData.content || apiNoteData.title || '', desc);
-    
-    // Extract images recursively
-    imageUrls = Array.from(new Set(extractUrlsFromObject(apiNoteData)));
-    
-    // Extract video
-    const possibleVideo = findVideoUrlInObject(apiNoteData);
-    if (possibleVideo) videoUrl = possibleVideo.replace(/^http:/i, 'https:');
-    
-    // Extract creator name
-    if (apiNoteData.user) {
-      creatorName = apiNoteData.user.nickname || creatorName;
-    } else if (apiNoteData.author) {
-      creatorName = apiNoteData.author.nickname || creatorName;
-    }
-    
-    // Extract publish date
-    const rawTime = apiNoteData.time || apiNoteData.publishTime || apiNoteData.createTime || apiNoteData.lastUpdateTime || apiNoteData.updateTime;
-    if (rawTime) {
-      if (typeof rawTime === 'number') {
-        const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
-        publishTime = new Date(ts).toISOString().split('T')[0];
-      } else if (typeof rawTime === 'string') {
-        publishTime = rawTime.split(' ')[0];
-      }
-    }
-    
-    fetchSuccess = true;
-  }
-  
+
   // 2. Try to scrape via temporary browser tab (super reliable, bypasses anti-crawler)
   if (!fetchSuccess || !desc) {
     try {
