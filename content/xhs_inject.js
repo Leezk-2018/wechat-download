@@ -6,17 +6,33 @@
 
   function checkAndSaveNotes(json, url) {
     try {
-      // Direct diagnostic log for notes list API response
+      // Auto-analyze and print note fields structure
       if (url && url.includes('/posted')) {
-        log('--- 发现列表 API 数据，打印前 2 个元素以诊断字段 ---');
+        log('--- 发现列表 API 数据，自动解构首个笔记的字段结构 ---');
         try {
-          if (json && json.data && json.data.notes) {
-            console.log('[XHS INJECT DIAGNOSTIC] json.data.notes sample:', json.data.notes.slice(0, 2));
-          } else if (json && json.data && Array.isArray(json.data)) {
-            console.log('[XHS INJECT DIAGNOSTIC] json.data array sample:', json.data.slice(0, 2));
+          if (json && json.data && json.data.notes && json.data.notes.length > 0) {
+            const firstNote = json.data.notes[0];
+            console.log('[XHS INJECT DIAGNOSTIC] First Note keys:', Object.keys(firstNote));
+            
+            const fieldsBreakdown = {};
+            for (const key in firstNote) {
+              const val = firstNote[key];
+              if (val && typeof val === 'object') {
+                fieldsBreakdown[key] = { 
+                  type: 'object', 
+                  keys: Object.keys(val).slice(0, 10),
+                  preview: Array.isArray(val) ? `Array(${val.length})` : 'Object'
+                };
+              } else {
+                fieldsBreakdown[key] = { 
+                  type: typeof val, 
+                  value: String(val).slice(0, 80) 
+                };
+              }
+            }
+            console.log('[XHS INJECT DIAGNOSTIC] First Note Fields Breakdown:', fieldsBreakdown);
           } else {
-            console.log('[XHS INJECT DIAGNOSTIC] Raw json root keys:', Object.keys(json));
-            console.log('[XHS INJECT DIAGNOSTIC] Raw json value:', json);
+            console.log('[XHS INJECT DIAGNOSTIC] Notes list is empty or structured differently.');
           }
         } catch (err) {
           console.error('[XHS INJECT DIAGNOSTIC ERROR]', err);
