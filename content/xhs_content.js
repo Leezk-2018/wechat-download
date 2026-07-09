@@ -282,6 +282,48 @@ function getNoteDate(container) {
   return '';
 }
 
+// Scan DOM attributes and URLs for xsec_token
+function findXsecTokenInDOM(container) {
+  const queryRegex = /[?&]xsec_token=([^&?#\s"]+)/i;
+  const jsonRegex = /"xsec_?token(?:Str)?"\s*:\s*"([^"]+)"/i;
+  const elements = container.querySelectorAll('*');
+  
+  for (const el of [container, ...Array.from(elements)]) {
+    if (el.attributes) {
+      for (let i = 0; i < el.attributes.length; i++) {
+        const val = el.attributes[i].value;
+        if (typeof val === 'string') {
+          const matchQuery = val.match(queryRegex);
+          if (matchQuery) return decodeURIComponent(matchQuery[1]);
+          const matchJson = val.match(jsonRegex);
+          if (matchJson) return decodeURIComponent(matchJson[1]);
+        }
+      }
+    }
+    if (el.href && typeof el.href === 'string') {
+      const match = el.href.match(queryRegex);
+      if (match) return decodeURIComponent(match[1]);
+    }
+  }
+  return '';
+}
+
+// Recursive helper to scan JSON object for xsecToken or xsec_token
+function findXsecToken(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  if (typeof obj.xsecToken === 'string') return obj.xsecToken;
+  if (typeof obj.xsec_token === 'string') return obj.xsec_token;
+  if (typeof obj.xsecTokenStr === 'string') return obj.xsecTokenStr;
+  
+  for (const k in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, k)) {
+      const res = findXsecToken(obj[k]);
+      if (res) return res;
+    }
+  }
+  return '';
+}
+
 // Recursive helper to find and rank candidate note IDs in a note container
 function findNoteIdInContainer(container) {
   const noteIdRegex = /\b[0-9a-f]{24}\b/gi;
@@ -448,11 +490,16 @@ function scanArticles() {
       const title = getNoteTitle(null, card);
       const date = getNoteDate(card);
       
+      const xsecToken = findXsecTokenInDOM(card);
+      const url = xsecToken ? 
+                  `https://www.xiaohongshu.com/explore/${id}?xsec_token=${xsecToken}&xsec_source=pc_creatormng` : 
+                  `https://www.xiaohongshu.com/explore/${id}`;
+                  
       noteContainers.set(card, {
         id,
         title,
         date,
-        url: `https://www.xiaohongshu.com/explore/${id}`
+        url
       });
     }
   });
@@ -467,18 +514,22 @@ function scanArticles() {
                           el.getAttribute('data-key');
                           
       if (potentialId && /^[0-9a-zA-Z_-]{20,32}$/.test(potentialId)) {
-        const cleanUrl = `https://www.xiaohongshu.com/explore/${potentialId}`;
         const container = el.closest('.note-card') || el.closest('tr') || el;
         if (noteContainers.has(container)) return;
         
         const title = getNoteTitle(null, container);
         const date = getNoteDate(container);
         
+        const xsecToken = findXsecTokenInDOM(container);
+        const url = xsecToken ? 
+                    `https://www.xiaohongshu.com/explore/${potentialId}?xsec_token=${xsecToken}&xsec_source=pc_creatormng` : 
+                    `https://www.xiaohongshu.com/explore/${potentialId}`;
+                    
         noteContainers.set(container, {
           id: potentialId,
           title,
           date,
-          url: cleanUrl
+          url
         });
       }
     });
@@ -507,11 +558,18 @@ function scanArticles() {
         }
         if (!date) date = getNoteDate(container);
         
+        const xsecTokenFromDOM = findXsecTokenInDOM(container);
+        const xsecTokenFromProps = findXsecToken(noteObj);
+        const xsecToken = xsecTokenFromProps || xsecTokenFromDOM;
+        const url = xsecToken ? 
+                    `https://www.xiaohongshu.com/explore/${id}?xsec_token=${xsecToken}&xsec_source=pc_creatormng` : 
+                    `https://www.xiaohongshu.com/explore/${id}`;
+                    
         noteContainers.set(container, {
           id,
           title,
           date,
-          url: `https://www.xiaohongshu.com/explore/${id}`
+          url
         });
       }
     });
