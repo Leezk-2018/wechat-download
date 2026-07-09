@@ -409,43 +409,7 @@ function findVideoUrlInObject(obj) {
   return null;
 }
 
-// Fetch note details from creator center APIs using current session cookies
-async function fetchFromCreatorApi(noteId) {
-  const endpoints = [
-    `https://creator.xiaohongshu.com/api/sns/v1/note/publish/detail?noteId=${noteId}`,
-    `https://creator.xiaohongshu.com/api/sns/v1/note/info?noteId=${noteId}`,
-    `https://creator.xiaohongshu.com/api/sns/v1/note/detail?noteId=${noteId}`
-  ];
-  
-  for (const url of endpoints) {
-    try {
-      log(`尝试从创作者后台 API 获取笔记内容: ${url}`, 'info');
-      const res = await fetch(url, {
-        credentials: 'include',
-        headers: {
-          'Accept': 'application/json, text/plain, */*',
-          'Accept-Language': 'zh-CN,zh;q=0.9',
-          'Referer': 'https://creator.xiaohongshu.com/new/note-manager'
-        }
-      });
-      if (res.ok) {
-        const json = await res.json();
-        log(`API 响应成功，正在解析 JSON 数据...`, 'success');
-        
-        const noteData = findNoteDataInState(json);
-        if (noteData) {
-          log(`成功从 API 解析出笔记数据!`, 'success');
-          return noteData;
-        }
-      } else {
-        log(`API 请求返回非200状态: HTTP ${res.status}`, 'warning');
-      }
-    } catch (err) {
-      log(`API 请求异常: ${err.message}`, 'warning');
-    }
-  }
-  return null;
-}
+
 
 // Download and parse Xiaohongshu note
 // Scrape public note page by opening a temporary tab
