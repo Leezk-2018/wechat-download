@@ -1,6 +1,5 @@
 // Content Script for Xiaohongshu Creator Platform (creator.xiaohongshu.com)
 
-let noteElements = [];
 let floatingBar = null;
 let scanInterval = null;
 let lastDetectedCount = 0;
@@ -60,20 +59,21 @@ function getCreatorName() {
 
 // Heuristics to find note title
 function getNoteTitle(el, container) {
-  // 1. Try element text first (if it's a link with text)
-  let text = el.textContent.trim();
-  if (text && text.length > 2 && !['编辑', '数据', '复制', '删除', '详情', '查看'].some(w => text.includes(w))) {
-    return text;
+  if (el) {
+    let text = el.textContent.trim();
+    if (text && text.length > 2 && !['编辑', '数据', '复制', '删除', '详情', '查看'].some(w => text.includes(w))) {
+      return text;
+    }
   }
   
   if (container) {
-    // 2. Try image alt inside the container
+    // 1. Try image alt inside the container
     const img = container.querySelector('img');
     if (img && img.alt && img.alt.trim().length > 2) {
       return img.alt.trim();
     }
     
-    // 3. Try selectors with "title", "name", "desc", "content"
+    // 2. Try selectors with "title", "name", "desc", "content"
     const titleEl = container.querySelector('[class*="title"], [class*="name"], [class*="desc"], [class*="content"]');
     if (titleEl && titleEl.textContent.trim().length > 2) {
       const txt = titleEl.textContent.trim();
@@ -82,10 +82,21 @@ function getNoteTitle(el, container) {
       }
     }
     
-    // 4. Try h3, h4, h5 headings
+    // 3. Try h3, h4, h5 headings
     const heading = container.querySelector('h3, h4, h5');
     if (heading && heading.textContent.trim().length > 2) {
       return heading.textContent.trim();
+    }
+    
+    // 4. Text content fallback (grab first block of text that looks like a title)
+    const divs = container.querySelectorAll('div, span, p');
+    for (const d of divs) {
+      if (d.children.length === 0) {
+        const txt = d.textContent.trim();
+        if (txt.length > 4 && txt.length < 100 && !['编辑', '数据', '复制', '删除', '详情', '查看'].some(w => txt.includes(w))) {
+          return txt;
+        }
+      }
     }
   }
   
@@ -142,39 +153,157 @@ function getNoteDate(container) {
   return '';
 }
 
+// Recursive helper to find and rank candidate note IDs in a note container
+function findNoteIdInContainer(container) {
+  const noteIdRegex = /\b[0-9a-f]{24}\b/gi;
+  const candidates = [];
+  
+  const addCandidate = (id, priority) => {
+    id = id.toLowerCase();
+    const existing = candidates.find(c => c.id === id);
+    if (existing) {
+      if (priority > existing.priority) existing.priority = priority;
+    } else {
+      candidates.push({ id, priority });
+    }
+  };
+  
+  const checkStr = (str, priority) => {
+    if (!str) return;
+    let match;
+    noteIdRegex.lastIndex = 0;
+    while ((match = noteIdRegex.exec(str)) !== null) {
+      addCandidate(match[0], priority);
+    }
+  };
+  
+  // Priority 3: Key attributes
+  const priorityAttributes = ['data-row-key', 'data-id', 'data-note-id', 'key', 'id'];
+  const elements = container.querySelectorAll('*');
+  [container, ...Array.from(elements)].forEach(el => {
+    if (el.attributes) {
+      for (let i = 0; i < el.attributes.length; i++) {
+        const attrName = el.attributes[i].name.toLowerCase();
+        const attrVal = el.attributes[i].value;
+        if (priorityAttributes.includes(attrName) || attrName.includes('key') || attrName.includes('id')) {
+          checkStr(attrVal, 3);
+        } else {
+          checkStr(attrVal, 1);
+        }
+      }
+    }
+    if (el.href) {
+      if (el.href.includes('explore') || el.href.includes('discovery')) {
+        checkStr(el.href, 2);
+      } else {
+        checkStr(el.href, 1);
+      }
+    }
+    if (el.src) checkStr(el.src, 1);
+  });
+  
+  // Sort candidates by priority descending
+  candidates.sort((a, b) => b.priority - a.priority);
+  return candidates.map(c => c.id);
+}
+
 // Scan the page DOM for Xiaohongshu note items
 function scanArticles() {
-  const currentUrls = new Set();
+  // 1. Find all action triggers (this represents the individual note cards or rows)
+  const allElements = document.querySelectorAll('*');
+  const actionButtons = Array.from(allElements).filter(el => {
+    if (el.children.length > 0) return false; // Leaf nodes only
+    const text = el.textContent.trim();
+    return ['复制链接', '编辑', '数据分析', '数据', '删除', 'Copy Link', 'Edit', 'Analytics'].includes(text);
+  });
   
-  // 1. Scan by data attributes (very common in React/AntD tables and lists)
-  const elementsWithId = document.querySelectorAll('[data-row-key], [data-id], [data-note-id], [data-key]');
-  elementsWithId.forEach(el => {
-    const potentialId = el.getAttribute('data-row-key') || 
-                        el.getAttribute('data-id') || 
-                        el.getAttribute('data-note-id') || 
-                        el.getAttribute('data-key');
-                        
-    if (potentialId && /^[0-9a-zA-Z_-]{20,32}$/.test(potentialId)) {
-      const cleanUrl = `https://www.xiaohongshu.com/explore/${potentialId}`;
-      currentUrls.add(cleanUrl);
-      
-      if (el.dataset.xhsDownloadInjected) return;
-      
-      const container = el;
-      const title = getNoteTitle(el, container);
-      const date = getNoteDate(container);
-      
-      el.dataset.xhsDownloadInjected = 'true';
-      el.dataset.xhsTitle = title;
-      el.dataset.xhsUrl = cleanUrl;
-      el.dataset.xhsDate = date;
-      
-      injectCheckboxToContainer(el, container, cleanUrl, title, date);
+  if (actionButtons.length === 0) {
+    // If no action buttons, try simple link scanning as fallback
+    scanArticlesByLinks();
+    return;
+  }
+  
+  // 2. Resolve the visual container representing each note card/row
+  const noteContainers = [];
+  actionButtons.forEach(btn => {
+    let container = btn;
+    while (container.parentElement) {
+      const parent = container.parentElement;
+      // Count how many buttons belong to this parent
+      const buttonsInParent = actionButtons.filter(b => parent.contains(b));
+      if (buttonsInParent.length > 1) {
+        break; // Stop climbing, we hit the table body / list parent wrapper
+      }
+      container = parent;
+    }
+    if (!noteContainers.includes(container)) {
+      noteContainers.push(container);
     }
   });
   
-  // 2. Scan by links (fallback/supplement)
+  // 3. Find and rank candidate IDs in each container
+  const containerIdMaps = [];
+  const idCounts = {};
+  
+  noteContainers.forEach(container => {
+    const ids = findNoteIdInContainer(container);
+    containerIdMaps.push({ container, ids });
+    ids.forEach(id => {
+      idCounts[id] = (idCounts[id] || 0) + 1;
+    });
+  });
+  
+  // Filter out IDs shared by all containers (like the user ID)
+  const sharedIds = new Set();
+  const totalContainers = noteContainers.length;
+  for (const id in idCounts) {
+    if (idCounts[id] >= totalContainers && totalContainers > 1) {
+      sharedIds.add(id);
+    }
+  }
+  
+  // 4. Inject checkboxes for each note
+  let injectCount = 0;
+  containerIdMaps.forEach(({ container, ids }) => {
+    const specificIds = ids.filter(id => !sharedIds.has(id));
+    if (specificIds.length > 0) {
+      const noteId = specificIds[0];
+      const cleanUrl = `https://www.xiaohongshu.com/explore/${noteId}`;
+      const title = getNoteTitle(null, container);
+      const date = getNoteDate(container);
+      
+      if (container.dataset.xhsDownloadInjected) {
+        // Update data values if changed
+        const cb = container.querySelector('.wx-download-checkbox');
+        if (cb) {
+          cb.dataset.xhsUrl = cleanUrl;
+          cb.dataset.xhsTitle = title;
+          cb.dataset.xhsDate = date;
+        }
+        return;
+      }
+      
+      container.dataset.xhsDownloadInjected = 'true';
+      injectCheckboxToContainer(container, container, cleanUrl, title, date);
+      injectCount++;
+    }
+  });
+  
+  // Update counts
+  const allCheckboxes = document.querySelectorAll('.wx-download-checkbox');
+  if (allCheckboxes.length !== lastDetectedCount) {
+    lastDetectedCount = allCheckboxes.length;
+    updateFloatingBarUI();
+    log(`扫描完成: 找到 ${noteContainers.length} 个笔记卡片, 新注入 ${injectCount} 个复选框, 当前总计 ${allCheckboxes.length} 个`);
+  }
+}
+
+// Fallback: Scan by links
+function scanArticlesByLinks() {
   const links = document.querySelectorAll('a');
+  const currentUrls = new Set();
+  let injectCount = 0;
+  
   links.forEach(link => {
     let url = link.getAttribute('href');
     if (!url) return;
@@ -215,13 +344,14 @@ function scanArticles() {
     link.dataset.xhsDate = date;
     
     injectCheckbox(link, container, cleanUrl, title, date);
+    injectCount++;
   });
   
-  // Update counts
   const allCheckboxes = document.querySelectorAll('.wx-download-checkbox');
   if (allCheckboxes.length !== lastDetectedCount) {
     lastDetectedCount = allCheckboxes.length;
     updateFloatingBarUI();
+    log(`链接兜底扫描完成: 新注入 ${injectCount} 个复选框, 当前总计 ${allCheckboxes.length} 个`);
   }
 }
 
@@ -237,7 +367,6 @@ function injectCheckbox(linkEl, container, url, title, date) {
   checkbox.type = 'checkbox';
   checkbox.className = 'wx-download-checkbox';
   
-  // Store metadata directly on checkbox for decoupled retrieval
   checkbox.dataset.xhsUrl = url;
   checkbox.dataset.xhsTitle = title;
   checkbox.dataset.xhsDate = date;
@@ -271,7 +400,6 @@ function injectCheckboxToContainer(el, container, url, title, date) {
   checkbox.type = 'checkbox';
   checkbox.className = 'wx-download-checkbox';
   
-  // Store metadata directly on checkbox for decoupled retrieval
   checkbox.dataset.xhsUrl = url;
   checkbox.dataset.xhsTitle = title;
   checkbox.dataset.xhsDate = date;
@@ -283,7 +411,6 @@ function injectCheckboxToContainer(el, container, url, title, date) {
   
   wrapper.appendChild(checkbox);
   
-  // If it's a table row, find the first td cell and prepend
   if (el.tagName.toLowerCase() === 'tr') {
     const firstCell = el.querySelector('td');
     if (firstCell) {
@@ -292,7 +419,6 @@ function injectCheckboxToContainer(el, container, url, title, date) {
       el.insertBefore(wrapper, el.firstChild);
     }
   } else {
-    // Grid cards
     el.insertBefore(wrapper, el.firstChild);
   }
   
@@ -308,7 +434,7 @@ function createFloatingBar() {
   
   floatingBar = document.createElement('div');
   floatingBar.id = 'wx-download-floating-panel';
-  floatingBar.className = 'wx-download-floating-bar'; // Visible by default to confirm extension is running
+  floatingBar.className = 'wx-download-floating-bar';
   
   floatingBar.innerHTML = `
     <div class="wx-download-floating-bar-header">
