@@ -1,8 +1,40 @@
 // Content Script for Xiaohongshu Creator Platform (creator.xiaohongshu.com)
 
+// IMMEDIATE DIAGNOSTIC LOG (Executed as soon as script loads)
+console.log('[XHS DEBUG] xhs_content.js loaded successfully at: ' + window.location.href);
+console.log('[XHS DEBUG] Window Details: parent is ' + (window.parent === window ? 'self' : 'parent') + ', top is ' + (window.top === window ? 'self' : 'top'));
+
 let floatingBar = null;
 let scanInterval = null;
 let lastDetectedCount = 0;
+
+// Diagnostic reporter that logs DOM details to console
+function runDiagnosticReport() {
+  try {
+    const report = {
+      url: window.location.href,
+      readyState: document.readyState,
+      iframesCount: document.querySelectorAll('iframe').length,
+      allElementsCount: document.querySelectorAll('*').length,
+      aTagsCount: document.querySelectorAll('a').length,
+      buttonTagsCount: document.querySelectorAll('button').length,
+      tableRowsCount: document.querySelectorAll('tr').length,
+      potentialNoteCards: document.querySelectorAll('[class*="note"], [class*="card"], [class*="item"]').length
+    };
+    
+    // Sample some button texts
+    const buttons = Array.from(document.querySelectorAll('button, a, span, div'))
+      .filter(el => el.children.length === 0 && el.textContent.trim().length > 0 && el.textContent.trim().length < 15)
+      .map(el => el.textContent.trim());
+    
+    const uniqueButtons = Array.from(new Set(buttons)).slice(0, 30);
+    
+    console.log('[XHS DIAGNOSTIC REPORT]', report);
+    console.log('[XHS DIAGNOSTIC BUTTON TEXT SAMPLE]', uniqueButtons);
+  } catch (e) {
+    console.error('[XHS DIAGNOSTIC ERROR]', e);
+  }
+}
 
 // Initialize Content Script
 function init() {
@@ -10,6 +42,10 @@ function init() {
   
   // Inject floating panel
   createFloatingBar();
+  
+  // Run diagnostics immediately and then every 5 seconds
+  runDiagnosticReport();
+  setInterval(runDiagnosticReport, 5000);
   
   // Start periodic scanner
   scanInterval = setInterval(scanArticles, 1500);
@@ -88,7 +124,7 @@ function getNoteTitle(el, container) {
       return heading.textContent.trim();
     }
     
-    // 4. Text content fallback (grab first block of text that looks like a title)
+    // 4. Text content fallback
     const divs = container.querySelectorAll('div, span, p');
     for (const d of divs) {
       if (d.children.length === 0) {
@@ -229,10 +265,9 @@ function scanArticles() {
     let container = btn;
     while (container.parentElement) {
       const parent = container.parentElement;
-      // Count how many buttons belong to this parent
       const buttonsInParent = actionButtons.filter(b => parent.contains(b));
       if (buttonsInParent.length > 1) {
-        break; // Stop climbing, we hit the table body / list parent wrapper
+        break; // Stop climbing, we hit the list parent wrapper
       }
       container = parent;
     }
@@ -273,7 +308,6 @@ function scanArticles() {
       const date = getNoteDate(container);
       
       if (container.dataset.xhsDownloadInjected) {
-        // Update data values if changed
         const cb = container.querySelector('.wx-download-checkbox');
         if (cb) {
           cb.dataset.xhsUrl = cleanUrl;
