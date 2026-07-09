@@ -565,8 +565,20 @@ async function downloadXhsNote(task) {
   
   let fetchSuccess = false;
   
+  // 0. Use pre-loaded data if available (fully populated by network interceptor in content script)
+  if (task.isPreLoaded) {
+    log(`检测到预载数据，直接使用已拦截的笔记详情`, 'success');
+    title = task.title || title;
+    desc = task.desc || '';
+    imageUrls = task.imageUrls || [];
+    videoUrl = task.videoUrl || '';
+    creatorName = task.accountName || creatorName;
+    publishTime = task.date || publishTime;
+    fetchSuccess = true;
+  }
+  
   // 1. Try to fetch from creator APIs first (in case it works)
-  const apiNoteData = await fetchFromCreatorApi(noteId);
+  const apiNoteData = !fetchSuccess ? await fetchFromCreatorApi(noteId) : null;
   if (apiNoteData) {
     title = apiNoteData.title || apiNoteData.content || apiNoteData.desc || title;
     desc = apiNoteData.desc || apiNoteData.content || apiNoteData.title || '';

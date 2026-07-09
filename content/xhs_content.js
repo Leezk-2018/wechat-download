@@ -7,6 +7,120 @@ let floatingBar = null;
 let scanInterval = null;
 let lastDetectedCount = 0;
 
+// Registry to store captured notes from intercepted API requests
+const interceptedNotes = new Map();
+
+// Inject main world script to intercept network requests (runs before page loads API feeds)
+function injectInterceptor() {
+  try {
+    const script = document.createElement('script');
+    script.textContent = `
+      (function() {
+        const log = (msg) => console.log('[XHS INJECT] ' + msg);
+        log('拦截脚本已注入，监控 API 请求...');
+
+        function checkAndSaveNotes(json) {
+          try {
+            const notes = [];
+            const scan = (obj) => {
+              if (!obj || typeof obj !== 'object') return;
+              
+              const isNote = (obj.noteId || obj.id || obj.note_id || obj.idStr) && 
+                             (obj.title || obj.desc || obj.content) && 
+                             (obj.imageList || obj.images || obj.image_list || obj.cover);
+                             
+              if (isNote) {
+                const id = obj.noteId || obj.id || obj.note_id || obj.idStr;
+                if (id && typeof id === 'string' && id.length === 24) {
+                  notes.push(obj);
+                  return;
+                }
+              }
+              
+              for (const k in obj) {
+                if (Object.prototype.hasOwnProperty.call(obj, k)) {
+                  scan(obj[k]);
+                }
+              }
+            };
+            
+            scan(json);
+            
+            if (notes.length > 0) {
+              log('拦截到 ' + notes.length + ' 篇笔记数据，正在传递给助手...');
+              window.dispatchEvent(new CustomEvent('XHS_NOTES_INTERCEPTED', { detail: notes }));
+            }
+          } catch (e) {
+            console.error('[XHS INJECT] 解析拦截数据失败:', e);
+          }
+        }
+
+        const originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+          const response = await originalFetch.apply(this, args);
+          try {
+            const url = args[0];
+            const urlStr = typeof url === 'string' ? url : (url instanceof URL ? url.href : '');
+            
+            if (urlStr && (urlStr.includes('/api/sns/') || urlStr.includes('/note/'))) {
+              const clone = response.clone();
+              clone.json().then(json => {
+                checkAndSaveNotes(json);
+              }).catch(() => {});
+            }
+          } catch (e) {}
+          return response;
+        };
+
+        const originalOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url, ...args) {
+          this._url = url;
+          return originalOpen.apply(this, [method, url, ...args]);
+        };
+
+        const originalSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.send = function(...args) {
+          this.addEventListener('load', function() {
+            try {
+              if (this._url && (this._url.includes('/api/sns/') || this._url.includes('/note/'))) {
+                const json = JSON.parse(this.responseText);
+                checkAndSaveNotes(json);
+              }
+            } catch (e) {}
+          });
+          return originalSend.apply(this, args);
+        };
+      })();
+    `;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+  } catch (e) {
+    console.error('[XHS Downloader] Failed to inject network interceptor:', e);
+  }
+}
+
+// Listen for intercepted notes event from the main world
+window.addEventListener('XHS_NOTES_INTERCEPTED', (e) => {
+  const notes = e.detail;
+  let count = 0;
+  notes.forEach(note => {
+    const id = note.noteId || note.id || note.note_id || note.idStr;
+    if (id && typeof id === 'string' && id.length === 24) {
+      if (!interceptedNotes.has(id)) {
+        interceptedNotes.set(id, note);
+        count++;
+      }
+    }
+  });
+  if (count > 0) {
+    log(`助手已缓存 ${count} 篇新拦截的笔记详情数据，当前总缓存 ${interceptedNotes.size} 篇`);
+  }
+});
+
+// Run immediate injection
+injectInterceptor();
+
+
 // Diagnostic reporter
 function runDiagnosticReport() {
   try {
@@ -660,10 +774,92 @@ async function startBatchDownload() {
   const creatorName = getCreatorName();
   
   checkedBoxes.forEach(cb => {
-    if (cb.dataset.xhsUrl) {
+    const url = cb.dataset.xhsUrl;
+    if (!url) return;
+    
+    const match = url.match(/(?:explore|discovery\/item)\/([0-9a-zA-Z_-]{20,32})/i);
+    if (!match) return;
+    const noteId = match[1];
+    
+    // Look up intercepted details
+    const noteData = interceptedNotes.get(noteId);
+    if (noteData) {
+      // Helper to extract image URLs from noteData
+      const urls = [];
+      const extractUrls = (obj) => {
+        if (!obj) return;
+        if (typeof obj === 'string') {
+          if (obj.startsWith('http') && (obj.includes('xhscdn.com') || obj.includes('sns-img') || obj.includes('sns-web'))) {
+            urls.push(obj);
+          }
+        } else if (typeof obj === 'object') {
+          for (const k in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, k)) {
+              extractUrls(obj[k]);
+            }
+          }
+        }
+      };
+      extractUrls(noteData);
+      const imageUrls = Array.from(new Set(urls));
+      
+      // Extract video
+      const extractVideo = (obj) => {
+        if (!obj) return null;
+        if (typeof obj === 'string') {
+          if (obj.startsWith('http') && (obj.includes('.mp4') || obj.includes('sns-video'))) {
+            return obj;
+          }
+        } else if (typeof obj === 'object') {
+          const pk = ['masterUrl', 'streamUrl', 'videoUrl', 'url'];
+          for (const k of pk) {
+            if (obj[k] && typeof obj[k] === 'string' && obj[k].startsWith('http') && (obj[k].includes('.mp4') || obj[k].includes('sns-video'))) {
+              return obj[k];
+            }
+          }
+          for (const k in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, k)) {
+              const res = extractVideo(obj[k]);
+              if (res) return res;
+            }
+          }
+        }
+        return null;
+      };
+      const videoUrl = extractVideo(noteData) || '';
+      
+      // Extract title and description
+      const noteTitle = noteData.title || noteData.content || cb.dataset.xhsTitle || '未命名笔记';
+      const noteDesc = noteData.desc || noteData.content || noteData.title || '';
+      
+      // Extract publish time
+      let date = cb.dataset.xhsDate || '';
+      const rawTime = noteData.time || noteData.publishTime || noteData.createTime || noteData.lastUpdateTime || noteData.updateTime;
+      if (rawTime) {
+        if (typeof rawTime === 'number') {
+          const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
+          date = new Date(ts).toISOString().split('T')[0];
+        } else if (typeof rawTime === 'string') {
+          date = rawTime.split(' ')[0];
+        }
+      }
+      
       tasks.push({
-        url: cb.dataset.xhsUrl,
-        title: cb.dataset.xhsTitle,
+        url: url,
+        title: noteTitle,
+        desc: noteDesc,
+        imageUrls: imageUrls,
+        videoUrl: videoUrl,
+        date: date,
+        accountName: creatorName,
+        type: 'xhs',
+        isPreLoaded: true
+      });
+    } else {
+      // Fallback: task without preloaded details
+      tasks.push({
+        url: url,
+        title: cb.dataset.xhsTitle || '未命名笔记',
         date: cb.dataset.xhsDate || '',
         accountName: creatorName,
         type: 'xhs'
