@@ -4,7 +4,7 @@
   const log = (msg) => console.log('[XHS INJECT] ' + msg);
   log('拦截脚本已加载至 MAIN 空间，监控 API 请求...');
 
-  function checkAndSaveNotes(json) {
+  function checkAndSaveNotes(json, url) {
     try {
       const notes = [];
       const scan = (obj) => {
@@ -30,7 +30,7 @@
       scan(json);
       
       if (notes.length > 0) {
-        log('主页面拦截到 ' + notes.length + ' 篇符合特征的笔记数据，正在发送事件...');
+        log('从 URL: ' + url + ' 中拦截到 ' + notes.length + ' 篇符合特征的笔记数据，正在发送事件...');
         window.dispatchEvent(new CustomEvent('XHS_NOTES_INTERCEPTED', { detail: notes }));
       }
     } catch (e) {
@@ -41,12 +41,15 @@
   // Intercept window.fetch
   const originalFetch = window.fetch;
   window.fetch = async function(...args) {
+    const url = args[0];
+    const urlStr = typeof url === 'string' ? url : (url instanceof URL ? url.href : '');
+    log('拦截到 fetch 请求: ' + urlStr);
+    
     const response = await originalFetch.apply(this, args);
     try {
-      // Parse JSON for all fetch responses to check for note models
       const clone = response.clone();
       clone.json().then(json => {
-        checkAndSaveNotes(json);
+        checkAndSaveNotes(json, urlStr);
       }).catch(() => {});
     } catch (e) {}
     return response;
@@ -61,10 +64,13 @@
 
   const originalSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function(...args) {
+    const urlStr = this._url || '';
+    log('拦截到 XHR 请求: ' + urlStr);
+    
     this.addEventListener('load', function() {
       try {
         const json = JSON.parse(this.responseText);
-        checkAndSaveNotes(json);
+        checkAndSaveNotes(json, urlStr);
       } catch (e) {}
     });
     return originalSend.apply(this, args);
