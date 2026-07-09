@@ -179,13 +179,17 @@ function checkPropsForNote(props) {
   if (!props || typeof props !== 'object') return null;
   
   let noteObj = null;
-  if (props.note && typeof props.note === 'object' && (props.note.id || props.note.noteId || props.note.note_id)) {
+  if (props.noteInfo && typeof props.noteInfo === 'object') {
+    noteObj = props.noteInfo;
+  } else if (props['note-info'] && typeof props['note-info'] === 'object') {
+    noteObj = props['note-info'];
+  } else if (props.note && typeof props.note === 'object') {
     noteObj = props.note;
-  } else if (props.record && typeof props.record === 'object' && (props.record.id || props.record.noteId || props.record.note_id)) {
+  } else if (props.record && typeof props.record === 'object') {
     noteObj = props.record;
-  } else if (props.item && typeof props.item === 'object' && (props.item.id || props.item.noteId || props.item.note_id)) {
+  } else if (props.item && typeof props.item === 'object') {
     noteObj = props.item;
-  } else if (props.data && typeof props.data === 'object' && (props.data.id || props.data.noteId || props.data.note_id)) {
+  } else if (props.data && typeof props.data === 'object') {
     noteObj = props.data;
   } else if (props.id && typeof props.id === 'string' && props.id.length === 24) {
     noteObj = props;
@@ -194,7 +198,7 @@ function checkPropsForNote(props) {
   }
   
   if (noteObj) {
-    const id = noteObj.id || noteObj.noteId || noteObj.note_id;
+    const id = noteObj.id || noteObj.noteId || noteObj.note_id || noteObj.id_str;
     if (id && typeof id === 'string' && id.length === 24) {
       return noteObj;
     }
@@ -202,20 +206,60 @@ function checkPropsForNote(props) {
   return null;
 }
 
-// Extract note props from DOM element using React fiber properties
+// Extract note props from DOM element using Vue or React properties (includes non-enumerable properties)
 function getNotePropsFromElement(el) {
-  const keys = Object.keys(el);
-  const propsKey = keys.find(k => k.startsWith('__reactProps$'));
-  const fiberKey = keys.find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+  const keys = Object.getOwnPropertyNames(el).concat(Object.keys(el));
   
-  // 1. Try __reactProps$ directly
-  if (propsKey && el[propsKey]) {
-    const props = el[propsKey];
-    const res = checkPropsForNote(props);
+  // 1. Check direct properties
+  if (el.noteInfo || el.note || el.record || el.item || el.data) {
+    const res = checkPropsForNote(el.noteInfo || el.note || el.record || el.item || el.data);
     if (res) return res;
   }
   
-  // 2. Try climbing the React Fiber tree
+  // 2. Check Vue 3 Component Instance
+  const vueParentKey = keys.find(k => k.startsWith('__vueParentComponent'));
+  if (vueParentKey && el[vueParentKey]) {
+    const comp = el[vueParentKey];
+    if (comp.props) {
+      const res = checkPropsForNote(comp.props);
+      if (res) return res;
+    }
+    if (comp.setupState) {
+      const res = checkPropsForNote(comp.setupState);
+      if (res) return res;
+    }
+  }
+  
+  // 3. Check Vue 3 VNode
+  const vnodeKey = keys.find(k => k.startsWith('__vnode'));
+  if (vnodeKey && el[vnodeKey]) {
+    const vnode = el[vnodeKey];
+    if (vnode.props) {
+      const res = checkPropsForNote(vnode.props);
+      if (res) return res;
+    }
+  }
+  
+  // 4. Check Vue 2 VM Instance
+  if (el.__vue__) {
+    const vm = el.__vue__;
+    const res = checkPropsForNote(vm);
+    if (res) return res;
+    if (vm.$props) {
+      const res = checkPropsForNote(vm.$props);
+      if (res) return res;
+    }
+  }
+  
+  // 5. Check React Props
+  const reactPropsKey = keys.find(k => k.startsWith('__reactProps$'));
+  if (reactPropsKey && el[reactPropsKey]) {
+    const res = checkPropsForNote(el[reactPropsKey]);
+    if (res) return res;
+  }
+  
+  // 6. Check React Fiber / Internal Instance
+  const fiberKey = keys.find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
   if (fiberKey && el[fiberKey]) {
     let node = el[fiberKey];
     while (node) {
@@ -235,13 +279,14 @@ function getNotePropsFromElement(el) {
 function scanArticles() {
   const noteContainers = new Map(); // container -> { id, title, date, url }
   
-  // Method 1: React internal properties scanning (primary method)
+  // Method 1: React/Vue internal properties scanning (primary method)
   const candidates = document.querySelectorAll('img, tr, td, div, span, p');
   candidates.forEach(el => {
     const noteObj = getNotePropsFromElement(el);
     if (noteObj) {
-      const id = noteObj.id || noteObj.noteId || noteObj.note_id;
-      const container = el.closest('.ant-table-row') || 
+      const id = noteObj.id || noteObj.noteId || noteObj.note_id || noteObj.id_str;
+      const container = el.closest('.note-card') ||
+                        el.closest('.ant-table-row') || 
                         el.closest('tr') || 
                         el.closest('.note-item') || 
                         el.closest('.card') || 
@@ -275,7 +320,7 @@ function scanArticles() {
     }
   });
   
-  // Method 2: Fallback scanning by action buttons (only if React scan found nothing)
+  // Method 2: Fallback scanning by action buttons (only if Vue/React scan found nothing)
   if (noteContainers.size === 0) {
     const allElements = document.querySelectorAll('*');
     const actionButtons = Array.from(allElements).filter(el => {
