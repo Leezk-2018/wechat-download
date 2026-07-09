@@ -6,6 +6,23 @@
 
   function checkAndSaveNotes(json, url) {
     try {
+      // Direct diagnostic log for notes list API response
+      if (url && url.includes('/posted')) {
+        log('--- 发现列表 API 数据，打印前 2 个元素以诊断字段 ---');
+        try {
+          if (json && json.data && json.data.notes) {
+            console.log('[XHS INJECT DIAGNOSTIC] json.data.notes sample:', json.data.notes.slice(0, 2));
+          } else if (json && json.data && Array.isArray(json.data)) {
+            console.log('[XHS INJECT DIAGNOSTIC] json.data array sample:', json.data.slice(0, 2));
+          } else {
+            console.log('[XHS INJECT DIAGNOSTIC] Raw json root keys:', Object.keys(json));
+            console.log('[XHS INJECT DIAGNOSTIC] Raw json value:', json);
+          }
+        } catch (err) {
+          console.error('[XHS INJECT DIAGNOSTIC ERROR]', err);
+        }
+      }
+
       const notes = [];
       const scan = (obj) => {
         if (!obj || typeof obj !== 'object') return;
@@ -43,7 +60,6 @@
   window.fetch = async function(...args) {
     const url = args[0];
     const urlStr = typeof url === 'string' ? url : (url instanceof URL ? url.href : '');
-    log('拦截到 fetch 请求: ' + urlStr);
     
     const response = await originalFetch.apply(this, args);
     try {
@@ -65,7 +81,6 @@
   const originalSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function(...args) {
     const urlStr = this._url || '';
-    log('拦截到 XHR 请求: ' + urlStr);
     
     this.addEventListener('load', function() {
       try {
