@@ -549,6 +549,27 @@ async function scrapeNoteViaTab(url) {
   });
 }
 
+// Helper to clean up titles and filter out login/error page titles
+function getCleanTitle(newTitle, fallbackTitle) {
+  const invalidTitles = ['登录', '手机号登录', '注册', '选择登录方式', '验证', '小红书 - 你访问的页面不见了', '你访问的页面不见了', '小红书'];
+  if (!newTitle) return fallbackTitle;
+  const clean = newTitle.replace('- 小红书', '').replace('_小红书', '').trim();
+  if (invalidTitles.includes(clean) || clean.length === 0) {
+    return fallbackTitle;
+  }
+  return clean;
+}
+
+// Helper to clean up descriptions and filter out login page texts
+function getCleanDesc(newDesc, fallbackDesc) {
+  if (!newDesc) return fallbackDesc;
+  const clean = newDesc.trim();
+  if (clean.includes('验证码') || clean.includes('登录方式') || clean.includes('验证即同意') || clean.includes('密码登录') || clean.includes('扫描二维码')) {
+    return fallbackDesc;
+  }
+  return clean;
+}
+
 // Download and parse Xiaohongshu note
 async function downloadXhsNote(task) {
   // Extract note ID from URL
@@ -568,8 +589,8 @@ async function downloadXhsNote(task) {
   // 0. Use pre-loaded data if available (fully populated by network interceptor in content script)
   if (task.isPreLoaded) {
     log(`检测到预载数据，直接使用已拦截的笔记详情`, 'success');
-    title = task.title || title;
-    desc = task.desc || '';
+    title = getCleanTitle(task.title, title);
+    desc = getCleanDesc(task.desc, desc);
     imageUrls = task.imageUrls || [];
     videoUrl = task.videoUrl || '';
     creatorName = task.accountName || creatorName;
@@ -580,8 +601,8 @@ async function downloadXhsNote(task) {
   // 1. Try to fetch from creator APIs first (in case it works)
   const apiNoteData = !fetchSuccess ? await fetchFromCreatorApi(noteId) : null;
   if (apiNoteData) {
-    title = apiNoteData.title || apiNoteData.content || apiNoteData.desc || title;
-    desc = apiNoteData.desc || apiNoteData.content || apiNoteData.title || '';
+    title = getCleanTitle(apiNoteData.title || apiNoteData.display_title || apiNoteData.content || apiNoteData.desc || title, title);
+    desc = getCleanDesc(apiNoteData.desc || apiNoteData.content || apiNoteData.title || '', desc);
     
     // Extract images recursively
     imageUrls = Array.from(new Set(extractUrlsFromObject(apiNoteData)));
@@ -619,8 +640,8 @@ async function downloadXhsNote(task) {
       if (result) {
         const stateNoteData = result.state ? findNoteDataInState(result.state) : null;
         if (stateNoteData) {
-          title = stateNoteData.title || result.title || title;
-          desc = stateNoteData.desc || result.desc || '';
+          title = getCleanTitle(stateNoteData.title || stateNoteData.display_title || result.title || title, title);
+          desc = getCleanDesc(stateNoteData.desc || result.desc || '', desc);
           imageUrls = Array.from(new Set(extractUrlsFromObject(stateNoteData)));
           const possibleVideo = findVideoUrlInObject(stateNoteData);
           if (possibleVideo) videoUrl = possibleVideo.replace(/^http:/i, 'https:');
@@ -639,8 +660,8 @@ async function downloadXhsNote(task) {
             }
           }
         } else {
-          title = result.title || title;
-          desc = result.desc || '';
+          title = getCleanTitle(result.title, title);
+          desc = getCleanDesc(result.desc, desc);
           imageUrls = result.images || [];
           creatorName = result.author || creatorName;
         }
@@ -681,8 +702,8 @@ async function downloadXhsNote(task) {
         const stateObj = JSON.parse(stateStr);
         const noteData = findNoteDataInState(stateObj);
         if (noteData) {
-          title = noteData.title || title;
-          desc = noteData.desc || '';
+          title = getCleanTitle(noteData.title || noteData.display_title || title, title);
+          desc = getCleanDesc(noteData.desc || '', desc);
           
           imageUrls = Array.from(new Set(extractUrlsFromObject(noteData)));
           
@@ -717,13 +738,13 @@ async function downloadXhsNote(task) {
                          htmlText.match(/<meta\s+name=["']og:title["']\s+content=["']([^"']+)["']/i) ||
                          htmlText.match(/<title>([\s\S]*?)<\/title>/i);
       if (titleMatch) {
-        title = decodeHTMLEntities(titleMatch[1].replace('- 小红书', '').replace('_小红书', '').trim());
+        title = getCleanTitle(decodeHTMLEntities(titleMatch[1].replace('- 小红书', '').replace('_小红书', '').trim()), title);
       }
       
       const descMatch = htmlText.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i) ||
                         htmlText.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
       if (descMatch) {
-        desc = decodeHTMLEntities(descMatch[1].trim());
+        desc = getCleanDesc(decodeHTMLEntities(descMatch[1].trim()), desc);
       }
       
       if (imageUrls.length === 0) {
