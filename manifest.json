@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "微信 & 小红书批量下载导出助手",
+  "name": "微信/小红书下载器",
   "version": "1.0.0",
   "description": "一键批量导出微信公众号文章和小红书笔记（包含高清原图、视频、全文描述及发布时间）为 HTML、Markdown 或图片 ZIP 包。",
   "permissions": [
