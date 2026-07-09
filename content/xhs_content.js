@@ -275,11 +275,10 @@ function scanArticles() {
     }
   });
   
-  // Method 2: Fallback scanning by action buttons
+  // Method 2: Fallback scanning by action buttons (only if React scan found nothing)
   if (noteContainers.size === 0) {
     const allElements = document.querySelectorAll('*');
     const actionButtons = Array.from(allElements).filter(el => {
-      if (el.children.length > 0) return false;
       const text = el.textContent.trim();
       return ['复制链接', '编辑', '数据分析', '数据', '删除', 'Copy Link', 'Edit', 'Analytics'].includes(text);
     });
@@ -296,7 +295,6 @@ function scanArticles() {
       }
       
       if (!noteContainers.has(container)) {
-        // Scan the container for any 24-character hexadecimal ID
         const ids = findNoteIdInContainer(container);
         if (ids.length > 0) {
           const id = ids[0];
