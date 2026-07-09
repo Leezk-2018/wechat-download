@@ -747,90 +747,36 @@ async function startBatchDownload() {
     if (!match) return;
     const noteId = match[1];
     
-    // Look up intercepted details
+    // Look up intercepted details to retrieve the xsec_token
     const noteData = interceptedNotes.get(noteId);
+    let xsecToken = '';
+    
     if (noteData) {
-      // Helper to extract image URLs from noteData
-      const urls = [];
-      const extractUrls = (obj) => {
-        if (!obj) return;
-        if (typeof obj === 'string') {
-          if (obj.startsWith('http') && (obj.includes('xhscdn.com') || obj.includes('sns-img') || obj.includes('sns-web'))) {
-            urls.push(obj);
-          }
-        } else if (typeof obj === 'object') {
-          for (const k in obj) {
-            if (Object.prototype.hasOwnProperty.call(obj, k)) {
-              extractUrls(obj[k]);
-            }
-          }
-        }
-      };
-      extractUrls(noteData);
-      const imageUrls = Array.from(new Set(urls));
-      
-      // Extract video
-      const extractVideo = (obj) => {
-        if (!obj) return null;
-        if (typeof obj === 'string') {
-          if (obj.startsWith('http') && (obj.includes('.mp4') || obj.includes('sns-video'))) {
-            return obj;
-          }
-        } else if (typeof obj === 'object') {
-          const pk = ['masterUrl', 'streamUrl', 'videoUrl', 'url'];
-          for (const k of pk) {
-            if (obj[k] && typeof obj[k] === 'string' && obj[k].startsWith('http') && (obj[k].includes('.mp4') || obj[k].includes('sns-video'))) {
-              return obj[k];
-            }
-          }
-          for (const k in obj) {
-            if (Object.prototype.hasOwnProperty.call(obj, k)) {
-              const res = extractVideo(obj[k]);
-              if (res) return res;
-            }
-          }
-        }
-        return null;
-      };
-      const videoUrl = extractVideo(noteData) || '';
-      
-      // Extract title and description
-      const noteTitle = noteData.title || noteData.content || cb.dataset.xhsTitle || '未命名笔记';
-      const noteDesc = noteData.desc || noteData.content || noteData.title || '';
-      
-      // Extract publish time
-      let date = cb.dataset.xhsDate || '';
-      const rawTime = noteData.time || noteData.publishTime || noteData.createTime || noteData.lastUpdateTime || noteData.updateTime;
-      if (rawTime) {
-        if (typeof rawTime === 'number') {
-          const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
-          date = new Date(ts).toISOString().split('T')[0];
-        } else if (typeof rawTime === 'string') {
-          date = rawTime.split(' ')[0];
-        }
-      }
-      
-      tasks.push({
-        url: url,
-        title: noteTitle,
-        desc: noteDesc,
-        imageUrls: imageUrls,
-        videoUrl: videoUrl,
-        date: date,
-        accountName: creatorName,
-        type: 'xhs',
-        isPreLoaded: true
-      });
-    } else {
-      // Fallback: task without preloaded details
-      tasks.push({
-        url: url,
-        title: cb.dataset.xhsTitle || '未命名笔记',
-        date: cb.dataset.xhsDate || '',
-        accountName: creatorName,
-        type: 'xhs'
-      });
+      xsecToken = noteData.xsec_token || findXsecToken(noteData) || '';
     }
+    
+    // Fallback: search card DOM for xsec_token
+    if (!xsecToken) {
+      xsecToken = findXsecTokenInDOM(cb.closest('.note-card') || document.body);
+    }
+    
+    const finalUrl = xsecToken ? 
+                     `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${xsecToken}&xsec_source=pc_creatormng` : 
+                     url;
+                     
+    log(`为笔记 ${noteId} 组装下载 URL: ${finalUrl}`);
+    
+    // We send isPreLoaded: false because the notes list API doesn't contain the full description text.
+    // By passing the URL containing the valid xsec_token to the background, 
+    // the background's smart tab scraper can load the public page successfully and scrape the full description.
+    tasks.push({
+      url: finalUrl,
+      title: cb.dataset.xhsTitle || '未命名笔记',
+      date: cb.dataset.xhsDate || '',
+      accountName: creatorName,
+      type: 'xhs',
+      isPreLoaded: false
+    });
   });
   
   if (tasks.length === 0) return;
@@ -854,6 +800,8 @@ async function startBatchDownload() {
     }
   });
 }
+
+
 
 // Update downloading progress
 function updateFloatingBarProgress() {

@@ -6,51 +6,20 @@
 
   function checkAndSaveNotes(json, url) {
     try {
-      // Auto-analyze and print note fields structure
-      if (url && url.includes('/posted')) {
-        log('--- 发现列表 API 数据，自动解构首个笔记的字段结构 ---');
-        try {
-          if (json && json.data && json.data.notes && json.data.notes.length > 0) {
-            const firstNote = json.data.notes[0];
-            console.log('[XHS INJECT DIAGNOSTIC] First Note keys:', Object.keys(firstNote));
-            
-            const fieldsBreakdown = {};
-            for (const key in firstNote) {
-              const val = firstNote[key];
-              if (val && typeof val === 'object') {
-                fieldsBreakdown[key] = { 
-                  type: 'object', 
-                  keys: Object.keys(val).slice(0, 10),
-                  preview: Array.isArray(val) ? `Array(${val.length})` : 'Object'
-                };
-              } else {
-                fieldsBreakdown[key] = { 
-                  type: typeof val, 
-                  value: String(val).slice(0, 80) 
-                };
-              }
-            }
-            console.log('[XHS INJECT DIAGNOSTIC] First Note Fields Breakdown:', fieldsBreakdown);
-          } else {
-            console.log('[XHS INJECT DIAGNOSTIC] Notes list is empty or structured differently.');
-          }
-        } catch (err) {
-          console.error('[XHS INJECT DIAGNOSTIC ERROR]', err);
-        }
-      }
-
       const notes = [];
       const scan = (obj) => {
         if (!obj || typeof obj !== 'object') return;
         
-        // Match any object that has a 24-character ID and some text (title, description, content or name)
-        const id = obj.noteId || obj.id || obj.note_id || obj.idStr;
+        // Match note object in the API response:
+        // Must have 'id' (length 24), 'display_title', and 'xsec_token'
+        const id = obj.id || obj.noteId || obj.note_id;
         const hasId = id && typeof id === 'string' && id.length === 24;
-        const hasText = !!(obj.title || obj.desc || obj.content || obj.name);
+        const hasTitle = !!(obj.display_title || obj.title);
+        const hasToken = !!(obj.xsec_token || obj.xsecToken);
                        
-        if (hasId && hasText) {
+        if (hasId && (hasTitle || hasToken)) {
           notes.push(obj);
-          return; // Stop scanning deeper into this matched object
+          return; // Stop scanning deeper
         }
         
         for (const k in obj) {
