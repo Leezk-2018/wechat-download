@@ -448,6 +448,108 @@ async function fetchFromCreatorApi(noteId) {
 }
 
 // Download and parse Xiaohongshu note
+// Scrape public note page by opening a temporary tab
+async function scrapeNoteViaTab(url) {
+  return new Promise((resolve, reject) => {
+    let tabId = null;
+    
+    const cleanUp = () => {
+      if (tabId) {
+        chrome.tabs.remove(tabId).catch(() => {});
+        tabId = null;
+      }
+    };
+    
+    // Set a timeout of 12 seconds
+    const timer = setTimeout(() => {
+      cleanUp();
+      reject(new Error('页面加载超时'));
+    }, 12000);
+    
+    chrome.tabs.create({ url, active: false }, (tab) => {
+      if (!tab) {
+        clearTimeout(timer);
+        reject(new Error('无法创建标签页'));
+        return;
+      }
+      tabId = tab.id;
+      
+      const checkTab = (updatedTabId, changeInfo) => {
+        if (updatedTabId === tabId && changeInfo.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(checkTab);
+          
+          // Wait 800ms for Vue/React to finish rendering
+          setTimeout(async () => {
+            try {
+              const results = await chrome.scripting.executeScript({
+                target: { tabId: tabId },
+                func: () => {
+                  const titleEl = document.querySelector('.title') || 
+                                  document.querySelector('[class*="title"]') ||
+                                  document.querySelector('h1');
+                                  
+                  const descEl = document.querySelector('.desc') || 
+                                 document.querySelector('[class*="desc"]') || 
+                                 document.querySelector('.note-text') || 
+                                 document.querySelector('[class*="note-text"]') ||
+                                 document.querySelector('.paragraph');
+                                 
+                  const images = [];
+                  const imgEls = document.querySelectorAll('img');
+                  imgEls.forEach(img => {
+                    const src = img.src || img.getAttribute('src');
+                    if (src && src.includes('xhscdn.com') && !src.includes('avatar') && !src.includes('logo') && !src.includes('fe-platform')) {
+                      images.push(src);
+                    }
+                  });
+                  
+                  let state = null;
+                  const scripts = Array.from(document.querySelectorAll('script'));
+                  const stateScript = scripts.find(s => s.textContent.includes('__INITIAL_STATE__'));
+                  if (stateScript) {
+                    try {
+                      const match = stateScript.textContent.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})(?:;|$)/);
+                      if (match) state = JSON.parse(match[1]);
+                    } catch (e) {}
+                  }
+                  
+                  const authorEl = document.querySelector('.nickname') || 
+                                   document.querySelector('.username') || 
+                                   document.querySelector('[class*="nickname"]');
+                                   
+                  return {
+                    title: titleEl?.textContent?.trim() || '',
+                    desc: descEl?.textContent?.trim() || '',
+                    images: images,
+                    author: authorEl?.textContent?.trim() || '',
+                    state: state
+                  };
+                }
+              });
+              
+              clearTimeout(timer);
+              cleanUp();
+              
+              if (results && results[0] && results[0].result) {
+                resolve(results[0].result);
+              } else {
+                reject(new Error('脚本执行无返回结果'));
+              }
+            } catch (err) {
+              clearTimeout(timer);
+              cleanUp();
+              reject(err);
+            }
+          }, 800);
+        }
+      };
+      
+      chrome.tabs.onUpdated.addListener(checkTab);
+    });
+  });
+}
+
+// Download and parse Xiaohongshu note
 async function downloadXhsNote(task) {
   // Extract note ID from URL
   const urlMatch = task.url.match(/(?:explore|discovery\/item)\/([0-9a-zA-Z_-]{20,32})/i);
@@ -463,7 +565,7 @@ async function downloadXhsNote(task) {
   
   let fetchSuccess = false;
   
-  // 1. Try to fetch from creator APIs first (highly reliable, bypasses explore anti-crawler)
+  // 1. Try to fetch from creator APIs first (in case it works)
   const apiNoteData = await fetchFromCreatorApi(noteId);
   if (apiNoteData) {
     title = apiNoteData.title || apiNoteData.content || apiNoteData.desc || title;
@@ -497,9 +599,49 @@ async function downloadXhsNote(task) {
     fetchSuccess = true;
   }
   
-  // 2. Fallback to public explore page if creator API failed
+  // 2. Try to scrape via temporary browser tab (super reliable, bypasses anti-crawler)
   if (!fetchSuccess || !desc) {
-    log(`正在尝试通过公开笔记页面抓取...`, 'info');
+    try {
+      log(`启动智能浏览器引擎，解析公开笔记页面: ${task.url}`, 'info');
+      const result = await scrapeNoteViaTab(task.url);
+      if (result) {
+        const stateNoteData = result.state ? findNoteDataInState(result.state) : null;
+        if (stateNoteData) {
+          title = stateNoteData.title || result.title || title;
+          desc = stateNoteData.desc || result.desc || '';
+          imageUrls = Array.from(new Set(extractUrlsFromObject(stateNoteData)));
+          const possibleVideo = findVideoUrlInObject(stateNoteData);
+          if (possibleVideo) videoUrl = possibleVideo.replace(/^http:/i, 'https:');
+          if (stateNoteData.user) {
+            creatorName = stateNoteData.user.nickname || result.author || creatorName;
+          } else if (stateNoteData.author) {
+            creatorName = stateNoteData.author.nickname || result.author || creatorName;
+          }
+          const rawTime = stateNoteData.time || stateNoteData.publishTime || stateNoteData.createTime || stateNoteData.lastUpdateTime || stateNoteData.updateTime;
+          if (rawTime) {
+            if (typeof rawTime === 'number') {
+              const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
+              publishTime = new Date(ts).toISOString().split('T')[0];
+            } else if (typeof rawTime === 'string') {
+              publishTime = rawTime.split(' ')[0];
+            }
+          }
+        } else {
+          title = result.title || title;
+          desc = result.desc || '';
+          imageUrls = result.images || [];
+          creatorName = result.author || creatorName;
+        }
+        fetchSuccess = true;
+      }
+    } catch (err) {
+      log(`智能浏览器引擎解析失败: ${err.message}，正在尝试后台直接抓取降级...`, 'warning');
+    }
+  }
+  
+  // 3. Fallback to public explore page direct fetch if still failed
+  if (!fetchSuccess || !desc) {
+    log(`正在尝试通过公开笔记页面后台直接抓取...`, 'info');
     let htmlText = '';
     try {
       const res = await fetch(task.url, {
