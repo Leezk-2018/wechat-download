@@ -331,12 +331,15 @@ function convertHtmlToTxt(htmlText, title, accountName, date, originalUrl) {
   return finalTxt;
 }
 
-// Recursive helper to find note data in state object
+// Recursive helper to find note data in state object or API response
 function findNoteDataInState(obj) {
   if (!obj || typeof obj !== 'object') return null;
   
-  // Check if it's the target note object
-  if (obj.title !== undefined && (obj.desc !== undefined || obj.descInfo !== undefined) && (obj.imageList || obj.images)) {
+  // A note object typically has (title or desc/content) AND (id/noteId)
+  const hasTitleOrDesc = (obj.title !== undefined || obj.desc !== undefined || obj.content !== undefined);
+  const hasId = (obj.id !== undefined || obj.noteId !== undefined || obj.note_id !== undefined);
+  
+  if (hasTitleOrDesc && hasId) {
     return obj;
   }
   
@@ -364,121 +367,224 @@ function findKeyInObject(obj, targetKey) {
   return null;
 }
 
+// Recursive helper to find any string starting with http and containing xhscdn or sns-img
+function extractUrlsFromObject(obj, urls = []) {
+  if (!obj) return urls;
+  if (typeof obj === 'string') {
+    if (obj.startsWith('http') && (obj.includes('xhscdn.com') || obj.includes('sns-img') || obj.includes('sns-web'))) {
+      urls.push(obj);
+    }
+  } else if (typeof obj === 'object') {
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        extractUrlsFromObject(obj[key], urls);
+      }
+    }
+  }
+  return urls;
+}
+
+// Recursive helper to find video stream URLs ending with .mp4 or containing sns-video
+function findVideoUrlInObject(obj) {
+  if (!obj) return null;
+  if (typeof obj === 'string') {
+    if (obj.startsWith('http') && (obj.includes('.mp4') || obj.includes('sns-video') || obj.includes('stream'))) {
+      return obj;
+    }
+  } else if (typeof obj === 'object') {
+    const priorityKeys = ['masterUrl', 'streamUrl', 'videoUrl', 'url', 'backupUrl'];
+    for (const key of priorityKeys) {
+      if (obj[key] && typeof obj[key] === 'string' && obj[key].startsWith('http') && (obj[key].includes('.mp4') || obj[key].includes('sns-video'))) {
+        return obj[key];
+      }
+    }
+    
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const res = findVideoUrlInObject(obj[key]);
+        if (res) return res;
+      }
+    }
+  }
+  return null;
+}
+
+// Fetch note details from creator center APIs using current session cookies
+async function fetchFromCreatorApi(noteId) {
+  const endpoints = [
+    `https://creator.xiaohongshu.com/api/sns/v1/note/publish/detail?noteId=${noteId}`,
+    `https://creator.xiaohongshu.com/api/sns/v1/note/info?noteId=${noteId}`,
+    `https://creator.xiaohongshu.com/api/sns/v1/note/detail?noteId=${noteId}`
+  ];
+  
+  for (const url of endpoints) {
+    try {
+      log(`尝试从创作者后台 API 获取笔记内容: ${url}`, 'info');
+      const res = await fetch(url, {
+        credentials: 'include',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+          'Referer': 'https://creator.xiaohongshu.com/new/note-manager'
+        }
+      });
+      if (res.ok) {
+        const json = await res.json();
+        log(`API 响应成功，正在解析 JSON 数据...`, 'success');
+        
+        const noteData = findNoteDataInState(json);
+        if (noteData) {
+          log(`成功从 API 解析出笔记数据!`, 'success');
+          return noteData;
+        }
+      } else {
+        log(`API 请求返回非200状态: HTTP ${res.status}`, 'warning');
+      }
+    } catch (err) {
+      log(`API 请求异常: ${err.message}`, 'warning');
+    }
+  }
+  return null;
+}
+
 // Download and parse Xiaohongshu note
 async function downloadXhsNote(task) {
-  // 1. Fetch page HTML
-  let htmlText = '';
-  try {
-    const res = await fetch(task.url);
-    if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
-    htmlText = await res.text();
-  } catch (err) {
-    throw new Error(`无法获取笔记内容: ${err.message}`);
-  }
+  // Extract note ID from URL
+  const urlMatch = task.url.match(/(?:explore|discovery\/item)\/([0-9a-zA-Z_-]{20,32})/i);
+  if (!urlMatch) throw new Error('无法从任务中解析出笔记 ID');
+  const noteId = urlMatch[1];
   
-  let title = task.title;
+  let title = task.title || '未命名笔记';
   let desc = '';
   let imageUrls = [];
   let videoUrl = '';
-  let creatorName = task.accountName || '';
+  let creatorName = task.accountName || '小红书创作者';
   let publishTime = task.date || '';
   
-  // 2. Try parsing __INITIAL_STATE__ first
-  const stateMatch = htmlText.match(/window\s*\.\s*__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})(?:;|<\/script>)/) ||
-                     htmlText.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})(?:;|<\/script>)/);
-                     
-  let parsedSuccess = false;
-  if (stateMatch) {
-    try {
-      let stateStr = stateMatch[1].trim();
-      const stateObj = JSON.parse(stateStr);
-      
-      const noteData = findNoteDataInState(stateObj);
-      if (noteData) {
-        title = noteData.title || title;
-        desc = noteData.desc || '';
-        
-        // Extract images
-        if (Array.isArray(noteData.imageList)) {
-          for (const img of noteData.imageList) {
-            const url = img.urlOriginal || img.urlDefault || img.url;
-            if (url) imageUrls.push(url.replace(/^http:/i, 'https:'));
-          }
-        } else if (Array.isArray(noteData.images)) {
-          for (const img of noteData.images) {
-            const url = img.url || img.src || img.urlOriginal;
-            if (url) imageUrls.push(url.replace(/^http:/i, 'https:'));
-          }
-        }
-        
-        // Extract video (if any)
-        if (noteData.video) {
-          const videoStream = findKeyInObject(noteData.video, 'masterUrl') || 
-                              findKeyInObject(noteData.video, 'url');
-          if (videoStream && typeof videoStream === 'string' && videoStream.startsWith('http')) {
-            videoUrl = videoStream.replace(/^http:/i, 'https:');
-          }
-        }
-        
-        // Extract creator/user
-        if (noteData.user) {
-          creatorName = noteData.user.nickname || creatorName;
-        } else if (noteData.author) {
-          creatorName = noteData.author.nickname || creatorName;
-        }
-        
-        // Extract time
-        if (noteData.time) {
-          const rawTime = noteData.time;
-          if (typeof rawTime === 'number') {
-            publishTime = new Date(rawTime).toISOString().split('T')[0];
-          } else if (typeof rawTime === 'string') {
-            publishTime = rawTime.split(' ')[0];
-          }
-        } else if (noteData.lastUpdateTime || noteData.updateTime || noteData.createTime) {
-          const rawTime = noteData.lastUpdateTime || noteData.updateTime || noteData.createTime;
-          if (typeof rawTime === 'number') {
-            const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
-            publishTime = new Date(ts).toISOString().split('T')[0];
-          } else if (typeof rawTime === 'string') {
-            publishTime = rawTime.split(' ')[0];
-          }
-        }
-        
-        parsedSuccess = true;
-      }
-    } catch (e) {
-      console.error('Failed to parse XHS state JSON:', e);
+  let fetchSuccess = false;
+  
+  // 1. Try to fetch from creator APIs first (highly reliable, bypasses explore anti-crawler)
+  const apiNoteData = await fetchFromCreatorApi(noteId);
+  if (apiNoteData) {
+    title = apiNoteData.title || apiNoteData.content || apiNoteData.desc || title;
+    desc = apiNoteData.desc || apiNoteData.content || apiNoteData.title || '';
+    
+    // Extract images recursively
+    imageUrls = Array.from(new Set(extractUrlsFromObject(apiNoteData)));
+    
+    // Extract video
+    const possibleVideo = findVideoUrlInObject(apiNoteData);
+    if (possibleVideo) videoUrl = possibleVideo.replace(/^http:/i, 'https:');
+    
+    // Extract creator name
+    if (apiNoteData.user) {
+      creatorName = apiNoteData.user.nickname || creatorName;
+    } else if (apiNoteData.author) {
+      creatorName = apiNoteData.author.nickname || creatorName;
     }
+    
+    // Extract publish date
+    const rawTime = apiNoteData.time || apiNoteData.publishTime || apiNoteData.createTime || apiNoteData.lastUpdateTime || apiNoteData.updateTime;
+    if (rawTime) {
+      if (typeof rawTime === 'number') {
+        const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
+        publishTime = new Date(ts).toISOString().split('T')[0];
+      } else if (typeof rawTime === 'string') {
+        publishTime = rawTime.split(' ')[0];
+      }
+    }
+    
+    fetchSuccess = true;
   }
   
-  // 3. Fallback to HTML meta tags and body parsing
-  if (!parsedSuccess || !desc) {
-    const titleMatch = htmlText.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i) ||
-                       htmlText.match(/<meta\s+name=["']og:title["']\s+content=["']([^"']+)["']/i) ||
-                       htmlText.match(/<title>([\s\S]*?)<\/title>/i);
-    if (titleMatch) {
-      title = decodeHTMLEntities(titleMatch[1].replace('- 小红书', '').replace('_小红书', '').trim());
+  // 2. Fallback to public explore page if creator API failed
+  if (!fetchSuccess || !desc) {
+    log(`正在尝试通过公开笔记页面抓取...`, 'info');
+    let htmlText = '';
+    try {
+      const res = await fetch(task.url, {
+        credentials: 'include',
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+          'Referer': 'https://www.xiaohongshu.com/'
+        }
+      });
+      if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
+      htmlText = await res.text();
+    } catch (err) {
+      throw new Error(`无法获取公开笔记页面: ${err.message}`);
     }
     
-    const descMatch = htmlText.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i) ||
-                      htmlText.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
-    if (descMatch) {
-      desc = decodeHTMLEntities(descMatch[1].trim());
+    // Parse __INITIAL_STATE__
+    const stateMatch = htmlText.match(/window\s*\.\s*__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})(?:;|<\/script>)/) ||
+                       htmlText.match(/__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})(?:;|<\/script>)/);
+                       
+    let parsedStateSuccess = false;
+    if (stateMatch) {
+      try {
+        let stateStr = stateMatch[1].trim();
+        const stateObj = JSON.parse(stateStr);
+        const noteData = findNoteDataInState(stateObj);
+        if (noteData) {
+          title = noteData.title || title;
+          desc = noteData.desc || '';
+          
+          imageUrls = Array.from(new Set(extractUrlsFromObject(noteData)));
+          
+          const possibleVideo = findVideoUrlInObject(noteData);
+          if (possibleVideo) videoUrl = possibleVideo.replace(/^http:/i, 'https:');
+          
+          if (noteData.user) {
+            creatorName = noteData.user.nickname || creatorName;
+          } else if (noteData.author) {
+            creatorName = noteData.author.nickname || creatorName;
+          }
+          
+          const rawTime = noteData.time || noteData.publishTime || noteData.createTime || noteData.lastUpdateTime || noteData.updateTime;
+          if (rawTime) {
+            if (typeof rawTime === 'number') {
+              const ts = rawTime > 1e11 ? rawTime : rawTime * 1000;
+              publishTime = new Date(ts).toISOString().split('T')[0];
+            } else if (typeof rawTime === 'string') {
+              publishTime = rawTime.split(' ')[0];
+            }
+          }
+          parsedStateSuccess = true;
+        }
+      } catch (e) {
+        console.error('Failed to parse XHS state JSON:', e);
+      }
     }
     
-    if (imageUrls.length === 0) {
-      const ogImgMatch = htmlText.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
-      if (ogImgMatch) {
-        imageUrls.push(ogImgMatch[1].replace(/^http:/i, 'https:'));
+    // HTML selectors parsing fallback
+    if (!parsedStateSuccess || !desc) {
+      const titleMatch = htmlText.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i) ||
+                         htmlText.match(/<meta\s+name=["']og:title["']\s+content=["']([^"']+)["']/i) ||
+                         htmlText.match(/<title>([\s\S]*?)<\/title>/i);
+      if (titleMatch) {
+        title = decodeHTMLEntities(titleMatch[1].replace('- 小红书', '').replace('_小红书', '').trim());
       }
       
-      const imgRegex = /<img\s+[^>]*src=["']([^"']+)["']/gi;
-      let match;
-      while ((match = imgRegex.exec(htmlText)) !== null) {
-        const src = match[1];
-        if (src.includes('xhscdn.com') && !src.includes('avatar') && !imageUrls.includes(src)) {
-          imageUrls.push(src.replace(/^http:/i, 'https:'));
+      const descMatch = htmlText.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i) ||
+                        htmlText.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+      if (descMatch) {
+        desc = decodeHTMLEntities(descMatch[1].trim());
+      }
+      
+      if (imageUrls.length === 0) {
+        const ogImgMatch = htmlText.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+        if (ogImgMatch) {
+          imageUrls.push(ogImgMatch[1].replace(/^http:/i, 'https:'));
+        }
+        
+        const imgRegex = /<img\s+[^>]*src=["']([^"']+)["']/gi;
+        let match;
+        while ((match = imgRegex.exec(htmlText)) !== null) {
+          const src = match[1];
+          if (src.includes('xhscdn.com') && !src.includes('avatar') && !imageUrls.includes(src)) {
+            imageUrls.push(src.replace(/^http:/i, 'https:'));
+          }
         }
       }
     }
