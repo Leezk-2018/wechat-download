@@ -10,17 +10,14 @@
       const scan = (obj) => {
         if (!obj || typeof obj !== 'object') return;
         
-        // A note item in the creator API list typically has noteId, title, etc.
-        const isNote = (obj.noteId || obj.id || obj.note_id || obj.idStr) && 
-                       (obj.title || obj.desc || obj.content) && 
-                       (obj.imageList || obj.images || obj.image_list || obj.cover);
+        // Match any object that has a 24-character ID and some text (title, description, content or name)
+        const id = obj.noteId || obj.id || obj.note_id || obj.idStr;
+        const hasId = id && typeof id === 'string' && id.length === 24;
+        const hasText = !!(obj.title || obj.desc || obj.content || obj.name);
                        
-        if (isNote) {
-          const id = obj.noteId || obj.id || obj.note_id || obj.idStr;
-          if (id && typeof id === 'string' && id.length === 24) {
-            notes.push(obj);
-            return;
-          }
+        if (hasId && hasText) {
+          notes.push(obj);
+          return; // Stop scanning deeper into this matched object
         }
         
         for (const k in obj) {
@@ -33,7 +30,7 @@
       scan(json);
       
       if (notes.length > 0) {
-        log('主页面拦截到 ' + notes.length + ' 篇笔记数据，正在通过 CustomEvent 发送...');
+        log('主页面拦截到 ' + notes.length + ' 篇符合特征的笔记数据，正在发送事件...');
         window.dispatchEvent(new CustomEvent('XHS_NOTES_INTERCEPTED', { detail: notes }));
       }
     } catch (e) {
@@ -46,15 +43,11 @@
   window.fetch = async function(...args) {
     const response = await originalFetch.apply(this, args);
     try {
-      const url = args[0];
-      const urlStr = typeof url === 'string' ? url : (url instanceof URL ? url.href : '');
-      
-      if (urlStr && (urlStr.includes('/api/sns/') || urlStr.includes('/note/'))) {
-        const clone = response.clone();
-        clone.json().then(json => {
-          checkAndSaveNotes(json);
-        }).catch(() => {});
-      }
+      // Parse JSON for all fetch responses to check for note models
+      const clone = response.clone();
+      clone.json().then(json => {
+        checkAndSaveNotes(json);
+      }).catch(() => {});
     } catch (e) {}
     return response;
   };
@@ -70,10 +63,8 @@
   XMLHttpRequest.prototype.send = function(...args) {
     this.addEventListener('load', function() {
       try {
-        if (this._url && (this._url.includes('/api/sns/') || this._url.includes('/note/'))) {
-          const json = JSON.parse(this.responseText);
-          checkAndSaveNotes(json);
-        }
+        const json = JSON.parse(this.responseText);
+        checkAndSaveNotes(json);
       } catch (e) {}
     });
     return originalSend.apply(this, args);
