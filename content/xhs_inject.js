@@ -1,9 +1,6 @@
 // Interceptor script injected into the MAIN world of creator.xiaohongshu.com
 
 (function() {
-  const log = (msg) => console.log('[XHS INJECT] ' + msg);
-  log('拦截脚本已加载至 MAIN 空间，监控 API 请求...');
-
   function checkAndSaveNotes(json, url) {
     try {
       const notes = [];
@@ -32,12 +29,9 @@
       scan(json);
       
       if (notes.length > 0) {
-        log('从 URL: ' + url + ' 中拦截到 ' + notes.length + ' 篇符合特征的笔记数据，正在发送事件...');
         window.dispatchEvent(new CustomEvent('XHS_NOTES_INTERCEPTED', { detail: notes }));
       }
-    } catch (e) {
-      console.error('[XHS INJECT] 解析拦截数据失败:', e);
-    }
+    } catch (e) {}
   }
 
   // Intercept window.fetch

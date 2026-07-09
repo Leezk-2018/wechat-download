@@ -1,8 +1,5 @@
 // Content Script for Xiaohongshu Creator Platform (creator.xiaohongshu.com)
 
-console.log('[XHS DEBUG] xhs_content.js loaded successfully at: ' + window.location.href);
-console.log('[XHS DEBUG] Window Details: parent is ' + (window.parent === window ? 'self' : 'parent') + ', top is ' + (window.top === window ? 'self' : 'top'));
-
 let floatingBar = null;
 let scanInterval = null;
 let lastDetectedCount = 0;
@@ -28,42 +25,11 @@ window.addEventListener('XHS_NOTES_INTERCEPTED', (e) => {
   }
 });
 
-
-// Diagnostic reporter
-function runDiagnosticReport() {
-  try {
-    const report = {
-      url: window.location.href,
-      readyState: document.readyState,
-      iframesCount: document.querySelectorAll('iframe').length,
-      allElementsCount: document.querySelectorAll('*').length,
-      aTagsCount: document.querySelectorAll('a').length,
-      buttonTagsCount: document.querySelectorAll('button').length,
-      tableRowsCount: document.querySelectorAll('tr').length,
-      potentialNoteCards: document.querySelectorAll('[class*="note"], [class*="card"], [class*="item"]').length
-    };
-    
-    const buttons = Array.from(document.querySelectorAll('button, a, span, div'))
-      .filter(el => el.children.length === 0 && el.textContent.trim().length > 0 && el.textContent.trim().length < 15)
-      .map(el => el.textContent.trim());
-    
-    const uniqueButtons = Array.from(new Set(buttons)).slice(0, 30);
-    
-    console.log('[XHS DIAGNOSTIC REPORT]', report);
-    console.log('[XHS DIAGNOSTIC BUTTON TEXT SAMPLE]', uniqueButtons);
-  } catch (e) {
-    console.error('[XHS DIAGNOSTIC ERROR]', e);
-  }
-}
-
 // Initialize Content Script
 function init() {
   log('小红书笔记批量下载器已激活');
   
   createFloatingBar();
-  
-  runDiagnosticReport();
-  setInterval(runDiagnosticReport, 5000);
   
   scanInterval = setInterval(scanArticles, 1500);
   scanArticles();
