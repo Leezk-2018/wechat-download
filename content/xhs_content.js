@@ -7,6 +7,48 @@ let floatingBar = null;
 let scanInterval = null;
 let lastDetectedCount = 0;
 
+// Detailed logger to inspect Vue properties on .note-card
+function debugVueProperties() {
+  try {
+    const cards = document.querySelectorAll('.note-card');
+    if (cards.length > 0) {
+      const card = cards[0];
+      const keys = Object.getOwnPropertyNames(card);
+      console.log('[XHS DEBUG] Found note-card, DOM keys:', keys);
+      
+      keys.forEach(k => {
+        if (k.includes('vue') || k.includes('react') || k.startsWith('__')) {
+          const val = card[k];
+          console.log(`[XHS DEBUG] Property "${k}" type: ${typeof val}`, val);
+          
+          if (val && typeof val === 'object') {
+            console.log(`[XHS DEBUG] Property "${k}" keys:`, Object.keys(val));
+            
+            // Check potential note objects inside it
+            if (val.props) {
+              console.log(`[XHS DEBUG] Property "${k}".props:`, val.props);
+              console.log(`[XHS DEBUG] Property "${k}".props keys:`, Object.keys(val.props));
+            }
+            if (val.setupState) {
+              console.log(`[XHS DEBUG] Property "${k}".setupState:`, val.setupState);
+            }
+            if (val.ctx) {
+              console.log(`[XHS DEBUG] Property "${k}".ctx keys:`, Object.keys(val.ctx));
+            }
+            if (val.memoizedProps) {
+              console.log(`[XHS DEBUG] Property "${k}".memoizedProps:`, val.memoizedProps);
+            }
+          }
+        }
+      });
+    } else {
+      console.log('[XHS DEBUG] No elements with class .note-card found.');
+    }
+  } catch (e) {
+    console.error('[XHS DEBUG] Error in debugVueProperties:', e);
+  }
+}
+
 // Diagnostic reporter
 function runDiagnosticReport() {
   try {
@@ -42,6 +84,10 @@ function init() {
   
   runDiagnosticReport();
   setInterval(runDiagnosticReport, 5000);
+  
+  // Debug Vue properties on note cards
+  setInterval(debugVueProperties, 4000);
+  setTimeout(debugVueProperties, 2000);
   
   scanInterval = setInterval(scanArticles, 1500);
   scanArticles();
