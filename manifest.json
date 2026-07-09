@@ -46,6 +46,17 @@
       ],
       "run_at": "document_start",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "https://creator.xiaohongshu.com/*"
+      ],
+      "js": [
+        "content/xhs_inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
     }
   ],
   "action": {

@@ -10,95 +10,6 @@ let lastDetectedCount = 0;
 // Registry to store captured notes from intercepted API requests
 const interceptedNotes = new Map();
 
-// Inject main world script to intercept network requests (runs before page loads API feeds)
-function injectInterceptor() {
-  try {
-    const script = document.createElement('script');
-    script.textContent = `
-      (function() {
-        const log = (msg) => console.log('[XHS INJECT] ' + msg);
-        log('拦截脚本已注入，监控 API 请求...');
-
-        function checkAndSaveNotes(json) {
-          try {
-            const notes = [];
-            const scan = (obj) => {
-              if (!obj || typeof obj !== 'object') return;
-              
-              const isNote = (obj.noteId || obj.id || obj.note_id || obj.idStr) && 
-                             (obj.title || obj.desc || obj.content) && 
-                             (obj.imageList || obj.images || obj.image_list || obj.cover);
-                             
-              if (isNote) {
-                const id = obj.noteId || obj.id || obj.note_id || obj.idStr;
-                if (id && typeof id === 'string' && id.length === 24) {
-                  notes.push(obj);
-                  return;
-                }
-              }
-              
-              for (const k in obj) {
-                if (Object.prototype.hasOwnProperty.call(obj, k)) {
-                  scan(obj[k]);
-                }
-              }
-            };
-            
-            scan(json);
-            
-            if (notes.length > 0) {
-              log('拦截到 ' + notes.length + ' 篇笔记数据，正在传递给助手...');
-              window.dispatchEvent(new CustomEvent('XHS_NOTES_INTERCEPTED', { detail: notes }));
-            }
-          } catch (e) {
-            console.error('[XHS INJECT] 解析拦截数据失败:', e);
-          }
-        }
-
-        const originalFetch = window.fetch;
-        window.fetch = async function(...args) {
-          const response = await originalFetch.apply(this, args);
-          try {
-            const url = args[0];
-            const urlStr = typeof url === 'string' ? url : (url instanceof URL ? url.href : '');
-            
-            if (urlStr && (urlStr.includes('/api/sns/') || urlStr.includes('/note/'))) {
-              const clone = response.clone();
-              clone.json().then(json => {
-                checkAndSaveNotes(json);
-              }).catch(() => {});
-            }
-          } catch (e) {}
-          return response;
-        };
-
-        const originalOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function(method, url, ...args) {
-          this._url = url;
-          return originalOpen.apply(this, [method, url, ...args]);
-        };
-
-        const originalSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.send = function(...args) {
-          this.addEventListener('load', function() {
-            try {
-              if (this._url && (this._url.includes('/api/sns/') || this._url.includes('/note/'))) {
-                const json = JSON.parse(this.responseText);
-                checkAndSaveNotes(json);
-              }
-            } catch (e) {}
-          });
-          return originalSend.apply(this, args);
-        };
-      })();
-    `;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove();
-  } catch (e) {
-    console.error('[XHS Downloader] Failed to inject network interceptor:', e);
-  }
-}
-
 // Listen for intercepted notes event from the main world
 window.addEventListener('XHS_NOTES_INTERCEPTED', (e) => {
   const notes = e.detail;
@@ -116,9 +27,6 @@ window.addEventListener('XHS_NOTES_INTERCEPTED', (e) => {
     log(`助手已缓存 ${count} 篇新拦截的笔记详情数据，当前总缓存 ${interceptedNotes.size} 篇`);
   }
 });
-
-// Run immediate injection
-injectInterceptor();
 
 
 // Diagnostic reporter
